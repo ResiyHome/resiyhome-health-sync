@@ -1,0 +1,72 @@
+name: Bug report
+description: Report a reproducible Health Sync problem without exposing private data.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not attach OAuth credentials, client secrets, access or refresh tokens, raw Google Health
+        responses, screenshots containing personal health values, or unredacted Home Assistant storage.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed credentials, account addresses, person names and slugs, device identifiers, health values, and unredacted storage from this report.
+          required: true
+  - type: input
+    id: integration_version
+    attributes:
+      label: Health Sync version
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: home_assistant_version
+    attributes:
+      label: Home Assistant version
+      placeholder: "YYYY.M.patch"
+    validations:
+      required: true
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - HACS custom repository
+        - Manual custom integration
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the affected entity keys or action and the expected behavior. Do not include health values.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. Open ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Sanitized status and diagnostics
+      description: Include only authorization/stale states, availability flags, dates, counts, and generic errors after reviewing them locally.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Final checks
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I can reproduce this on the current release or explained why I cannot update safely.
+          required: true

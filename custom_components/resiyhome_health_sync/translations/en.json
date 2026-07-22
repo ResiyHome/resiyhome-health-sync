@@ -1,0 +1,55 @@
+{
+  "application_credentials": {
+    "description": "Create an OAuth client in Google Cloud, add Home Assistant's OAuth redirect URI, then enter the client ID and secret here. Google Cloud credentials: {oauth_creds_url}. OAuth consent screen: {oauth_consent_url}."
+  },
+  "config": {
+    "abort": {
+      "already_configured": "This person is already enrolled.",
+      "already_in_progress": "Enrollment for this person is already in progress.",
+      "invalid_flow_state": "The enrollment session expired. Start again.",
+      "missing_configuration": "Add Google OAuth application credentials before setting up Health Sync by ResiyHome.",
+      "missing_credentials": "Add Google OAuth application credentials before setting up Health Sync by ResiyHome.",
+      "missing_scope": "Google did not grant all required read-only health scopes.",
+      "oauth_error": "Google returned an invalid authorization response.",
+      "oauth_failed": "Google authorization failed.",
+      "oauth_implementation_unavailable": "Google OAuth application credentials are not available.",
+      "oauth_timeout": "Google authorization timed out.",
+      "oauth_unauthorized": "Google rejected the authorization.",
+      "reauth_successful": "Authorization was renewed.",
+      "reconfigure_successful": "Authorization was updated.",
+      "user_rejected_authorize": "Google authorization was not approved."
+    },
+    "error": {
+      "invalid_person_name": "Enter a valid person name."
+    },
+    "step": {
+      "reauth_confirm": {
+        "description": "Renew Google Health authorization for {name}.",
+        "title": "Reauthorize Health Sync by ResiyHome"
+      },
+      "reconfigure_confirm": {
+        "description": "Update Google Health authorization. Existing entities for this person will be reused.",
+        "title": "Reconfigure Health Sync by ResiyHome"
+      },
+      "user": {
+        "data": {
+          "person_name": "Person name"
+        },
+        "description": "Create one private Google Health connection for this person. Google OAuth credentials are stored once in Home Assistant application credentials.",
+        "title": "Add Health Sync by ResiyHome"
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "include_body_measurements": "Include body measurements"
+        },
+        "data_description": {
+          "include_body_measurements": "Fetch and expose weight for this person. This is disabled by default. Body fat and height are not included."
+        }
+      }
+    }
+  }
+}

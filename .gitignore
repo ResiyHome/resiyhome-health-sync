@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.worktrees/
+.superpowers/
+.env
+client_secret*.json
+*token*.json
+*.credentials.json

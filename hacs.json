@@ -1,0 +1,7 @@
+{
+  "name": "Health Sync by ResiyHome",
+  "content_in_root": false,
+  "render_readme": true,
+  "domains": ["resiyhome_health_sync"],
+  "homeassistant": "2026.7.2"
+}

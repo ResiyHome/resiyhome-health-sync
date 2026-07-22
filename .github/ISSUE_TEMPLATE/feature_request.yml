@@ -1,0 +1,50 @@
+name: Feature request
+description: Propose a focused improvement and identify its privacy impact.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Do not attach OAuth credentials, client secrets, access or refresh tokens, raw Google Health
+        responses, screenshots containing personal health values, or unredacted Home Assistant storage.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed credentials, account addresses, person names and slugs, device identifiers, health values, and unredacted storage from this request.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Explain the general need without disclosing a person's health data.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the entity, action, history, or documentation behavior you expect.
+    validations:
+      required: true
+  - type: textarea
+    id: privacy_impact
+    attributes:
+      label: Privacy, OAuth, and compatibility impact
+      description: State whether this needs a new Google data type, broader scope, stored field, body measurement, or entity migration.
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Project boundaries
+      options:
+        - label: This request keeps OAuth user-owned and does not require a hosted/shared backend.
+          required: true
+        - label: I understand requests for broader Google permissions may be declined.
+          required: true
+        - label: I searched existing issues and documentation.
+          required: true

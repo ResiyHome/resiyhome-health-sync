@@ -1,0 +1,54 @@
+{
+  "application_credentials": {
+    "description": "Create an OAuth client in Google Cloud, add Home Assistant's OAuth redirect URI, then enter the client ID and secret here. Google Cloud credentials: {oauth_creds_url}. OAuth consent screen: {oauth_consent_url}."
+  },
+  "config": {
+    "abort": {
+      "already_configured": "This person is already enrolled.",
+      "already_in_progress": "Enrollment for this person is already in progress.",
+      "invalid_flow_state": "The enrollment session expired. Start again.",
+      "missing_configuration": "Add Google OAuth application credentials before setting up Health Sync by ResiyHome.",
+      "missing_credentials": "Add Google OAuth application credentials before setting up Health Sync by ResiyHome.",
+      "missing_scope": "Google did not grant all required read-only health scopes.",
+      "oauth_error": "Google returned an invalid authorization response.",
+      "oauth_failed": "Google authorization failed.",
+      "oauth_implementation_unavailable": "Google OAuth application credentials are not available.",
+      "oauth_timeout": "Google authorization timed out.",
+      "oauth_unauthorized": "Google rejected the authorization.",
+      "user_rejected_authorize": "Google authorization was not approved.",
+      "reauth_successful": "Authorization was renewed.",
+      "reconfigure_successful": "Authorization was updated."
+    },
+    "error": {
+      "cannot_connect": "Google authorization is temporarily unavailable.",
+      "invalid_auth": "The authorization code was not accepted.",
+      "invalid_client": "Enter the Google OAuth client ID and client secret.",
+      "invalid_person_name": "Enter a valid person name.",
+      "missing_scope": "Google did not grant all three required read-only health scopes."
+    },
+    "step": {
+      "reauth_confirm": {
+        "description": "Renew Google Health authorization for {name}.",
+        "title": "Reauthorize Health Sync by ResiyHome"
+      },
+      "reconfigure_confirm": {
+        "description": "Update Google Health authorization. Existing entities for this person will be reused.",
+        "title": "Reconfigure Health Sync by ResiyHome"
+      },
+      "authorize": {
+        "data": {
+          "authorization_code": "One-time authorization code"
+        },
+        "description": "Open {authorization_url}, approve read-only access, then enter the one-time code.",
+        "title": "Authorize Google Health"
+      },
+      "user": {
+        "data": {
+          "person_name": "Person name"
+        },
+        "description": "Create one private Google Health connection for this person. Google OAuth credentials are stored once in Home Assistant application credentials.",
+        "title": "Add Health Sync by ResiyHome"
+      }
+    }
+  }
+}

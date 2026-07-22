@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://github.com/ResiyHome/resiyhome-health-sync#documentation
+    about: Review installation, OAuth, entity, privacy, and troubleshooting guides first.
+  - name: Security policy
+    url: https://github.com/ResiyHome/resiyhome-health-sync/security/policy
+    about: Use the private security-reporting process and never disclose secrets publicly.

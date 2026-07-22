@@ -1,0 +1,33 @@
+refresh:
+  name: Refresh health data
+  description: Refresh one enrolled person's current Google Health data.
+  fields:
+    person:
+      name: Person
+      description: The enrolled person's stable slug, such as person_1.
+      required: true
+      selector:
+        text:
+
+probe_optional_data_types:
+  name: Probe optional data types
+  description: >-
+    Check which optional Google Health data types are available without returning
+    health values, credentials, identifiers, or raw API payloads.
+  fields:
+    person:
+      name: Person
+      description: The enrolled person's stable slug, such as person_1.
+      required: true
+      selector:
+        text:
+    days:
+      name: Days
+      description: Lookback period. Google limits some candidate types to 14 days.
+      required: false
+      default: 7
+      selector:
+        number:
+          min: 1
+          max: 14
+          mode: box

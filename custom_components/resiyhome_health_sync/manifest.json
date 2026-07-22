@@ -1,0 +1,13 @@
+{
+  "domain": "resiyhome_health_sync",
+  "name": "Health Sync by ResiyHome",
+  "codeowners": ["@rwolfe5420"],
+  "config_flow": true,
+  "dependencies": ["application_credentials", "http"],
+  "documentation": "https://github.com/ResiyHome/resiyhome-health-sync#readme",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/ResiyHome/resiyhome-health-sync/issues",
+  "requirements": [],
+  "version": "1.0.0"
+}

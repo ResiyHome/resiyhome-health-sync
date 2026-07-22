@@ -1,0 +1,219 @@
+{
+  "day": "2042-07-13",
+  "raw": {
+    "steps": [
+      {
+        "dataSource": {
+          "platform": " fitbit "
+        },
+        "steps": {
+          "interval": {
+            "startTime": "2042-07-13T10:00:00Z",
+            "startUtcOffset": "-14400s",
+            "endTime": "2042-07-13T11:00:00Z",
+            "endUtcOffset": "-14400s"
+          },
+          "count": "1111"
+        }
+      },
+      {
+        "dataSource": {
+          "platform": "health_kit"
+        },
+        "steps": {
+          "interval": {
+            "startTime": "2042-07-13T10:30:00Z",
+            "startUtcOffset": "-14400s",
+            "endTime": "2042-07-13T11:30:00Z",
+            "endUtcOffset": "-14400s"
+          },
+          "count": "2222"
+        }
+      }
+    ]
+  },
+  "all_sources": {
+    "steps": [
+      {
+        "steps": {
+          "interval": {
+            "startTime": "2042-07-13T10:00:00Z",
+            "startUtcOffset": "-14400s",
+            "endTime": "2042-07-13T11:30:00Z",
+            "endUtcOffset": "-14400s"
+          },
+          "count": "3000"
+        }
+      }
+    ],
+    "distance": [
+      {
+        "distance": {
+          "interval": {
+            "startTime": "2042-07-13T10:00:00Z",
+            "startUtcOffset": "-14400s",
+            "endTime": "2042-07-13T11:30:00Z",
+            "endUtcOffset": "-14400s"
+          },
+          "millimeters": "1234000"
+        }
+      }
+    ],
+    "active-energy-burned": [
+      {
+        "activeEnergyBurned": {
+          "interval": {
+            "startTime": "2042-07-13T10:00:00Z",
+            "startUtcOffset": "-14400s",
+            "endTime": "2042-07-13T11:30:00Z",
+            "endUtcOffset": "-14400s"
+          },
+          "kcal": 123.0
+        }
+      }
+    ],
+    "active-minutes": [
+      {
+        "activeMinutes": {
+          "interval": {
+            "startTime": "2042-07-13T10:00:00Z",
+            "startUtcOffset": "-14400s",
+            "endTime": "2042-07-13T11:30:00Z",
+            "endUtcOffset": "-14400s"
+          },
+          "activeMinutesByActivityLevel": [
+            {
+              "activityLevel": "LIGHT",
+              "activeMinutes": "11"
+            },
+            {
+              "activityLevel": "MODERATE",
+              "activeMinutes": "22"
+            }
+          ]
+        }
+      }
+    ],
+    "heart-rate": [
+      {
+        "heartRate": {
+          "sampleTime": {
+            "physicalTime": "2042-07-13T10:00:00Z",
+            "utcOffset": "-14400s"
+          },
+          "beatsPerMinute": "60"
+        }
+      },
+      {
+        "heartRate": {
+          "sampleTime": {
+            "physicalTime": "2042-07-13T11:00:00Z",
+            "utcOffset": "-14400s"
+          },
+          "beatsPerMinute": "90"
+        }
+      }
+    ],
+    "heart-rate-variability": [
+      {
+        "heartRateVariability": {
+          "sampleTime": {
+            "physicalTime": "2042-07-13T06:30:00Z",
+            "utcOffset": "-14400s"
+          },
+          "rootMeanSquareOfSuccessiveDifferencesMilliseconds": 33.0
+        }
+      }
+    ],
+    "daily-resting-heart-rate": [
+      {
+        "dailyRestingHeartRate": {
+          "date": {
+            "year": 2042,
+            "month": 7,
+            "day": 13
+          },
+          "beatsPerMinute": "55"
+        }
+      }
+    ],
+    "daily-heart-rate-variability": [
+      {
+        "dailyHeartRateVariability": {
+          "date": {
+            "year": 2042,
+            "month": 7,
+            "day": 13
+          },
+          "averageHeartRateVariabilityMilliseconds": 44.0
+        }
+      }
+    ],
+    "exercise": [
+      {
+        "exercise": {
+          "interval": {
+            "startTime": "2042-07-13T14:00:00Z",
+            "startUtcOffset": "-14400s",
+            "endTime": "2042-07-13T14:30:00Z",
+            "endUtcOffset": "-14400s"
+          },
+          "exerciseType": "WALKING",
+          "displayName": "Synthetic contract walk",
+          "activeDuration": "1800s",
+          "metricsSummary": {
+            "caloriesKcal": 111.0
+          }
+        }
+      }
+    ],
+    "sleep": [
+      {
+        "sleep": {
+          "interval": {
+            "startTime": "2042-07-12T23:30:00Z",
+            "startUtcOffset": "-14400s",
+            "endTime": "2042-07-13T07:00:00Z",
+            "endUtcOffset": "-14400s"
+          },
+          "summary": {
+            "minutesAsleep": "390",
+            "stagesSummary": [
+              {
+                "type": "AWAKE",
+                "minutes": "30"
+              },
+              {
+                "type": "LIGHT",
+                "minutes": "210"
+              },
+              {
+                "type": "DEEP",
+                "minutes": "90"
+              },
+              {
+                "type": "REM",
+                "minutes": "90"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "wearables": {
+    "steps": [
+      {
+        "steps": {
+          "interval": {
+            "startTime": "2042-07-13T10:00:00Z",
+            "startUtcOffset": "-14400s",
+            "endTime": "2042-07-13T11:00:00Z",
+            "endUtcOffset": "-14400s"
+          },
+          "count": "1111"
+        }
+      }
+    ]
+  }
+}
