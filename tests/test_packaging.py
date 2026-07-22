@@ -107,7 +107,13 @@ def test_hacs_metadata_marks_custom_integration() -> None:
     assert metadata["name"] == "Health Sync by ResiyHome"
     assert metadata["content_in_root"] is False
     assert metadata["render_readme"] is True
-    assert metadata["domains"] == ["resiyhome_health_sync"]
+    assert metadata["homeassistant"] == "2026.7.2"
+    assert set(metadata) == {
+        "name",
+        "content_in_root",
+        "render_readme",
+        "homeassistant",
+    }
 
 
 def test_readme_documents_only_required_read_only_scopes() -> None:
