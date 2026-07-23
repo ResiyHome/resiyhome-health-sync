@@ -19,20 +19,64 @@ from custom_components.resiyhome_health_sync.models import DailySummary, Expande
 from custom_components.resiyhome_health_sync.storage import HealthHistoryStore
 
 
-async def test_backfill_uses_31_day_window_and_persists_checkpoint(hass) -> None:
+class _HighVolumeWindowClient(FakeClient):
+    """Model a stream that exceeds transport pagination beyond seven days."""
+
+    async def async_list_data_points(
+        self, data_type: str, *, start: datetime, end: datetime
+    ) -> list[dict]:
+        if data_type == "heart-rate" and end - start > timedelta(days=7):
+            raise UpdateFailed("pagination exceeded the result limit")
+        return await super().async_list_data_points(data_type, start=start, end=end)
+
+    async def async_reconcile_data_points(
+        self,
+        data_type: str,
+        *,
+        start: datetime,
+        end: datetime,
+        source_family: str,
+    ) -> list[dict]:
+        if data_type == "heart-rate" and end - start > timedelta(days=7):
+            raise UpdateFailed("pagination exceeded the result limit")
+        return await super().async_reconcile_data_points(
+            data_type,
+            start=start,
+            end=end,
+            source_family=source_family,
+        )
+
+
+async def test_backfill_bounds_high_volume_core_window_to_seven_days(hass) -> None:
+    now = datetime(2042, 7, 13, 15, 0, tzinfo=UTC)
+    store = FakeStore()
+    coordinator = HealthSyncCoordinator(
+        hass,
+        _HighVolumeWindowClient(),
+        store,
+        now=lambda: now,
+    )
+
+    snapshot = await coordinator.async_backfill_step()
+
+    assert store.backfill_cursor == date(2042, 7, 6)
+    assert snapshot.backfill_cursor == date(2042, 7, 6)
+
+
+async def test_backfill_uses_7_day_window_and_persists_checkpoint(hass) -> None:
     now = datetime(2042, 7, 13, 15, 0, tzinfo=UTC)
     client = FakeClient()
-    client.all_sources["steps"] = [_steps(date(2042, 6, 15), 7200)]
-    client.wearables["steps"] = [_steps(date(2042, 6, 15), 7000)]
+    client.all_sources["steps"] = [_steps(date(2042, 7, 10), 7200)]
+    client.wearables["steps"] = [_steps(date(2042, 7, 10), 7000)]
     store = FakeStore()
     coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
 
     snapshot = await coordinator.async_backfill_step()
 
-    assert store.backfill_cursor == date(2042, 6, 12)
-    assert store.checkpoints == [date(2042, 6, 12)]
-    assert store.rows[date(2042, 6, 15)].steps == 7200
-    assert snapshot.backfill_cursor == date(2042, 6, 12)
+    assert store.backfill_cursor == date(2042, 7, 6)
+    assert store.checkpoints == [date(2042, 7, 6)]
+    assert store.rows[date(2042, 7, 10)].steps == 7200
+    assert snapshot.backfill_cursor == date(2042, 7, 6)
     windows = {
         (call[2], call[3])
         for call in client.calls
@@ -42,7 +86,7 @@ async def test_backfill_uses_31_day_window_and_persists_checkpoint(hass) -> None
     }
     assert windows == {
         (
-            datetime(2042, 6, 12, tzinfo=UTC),
+            datetime(2042, 7, 6, tzinfo=UTC),
             datetime(2042, 7, 13, tzinfo=UTC),
         )
     }
@@ -56,7 +100,7 @@ async def test_empty_window_advances_and_does_not_complete_early(hass) -> None:
     first = await coordinator.async_backfill_step()
     second = await coordinator.async_backfill_step()
 
-    assert store.checkpoints == [date(2042, 6, 12), date(2042, 5, 12)]
+    assert store.checkpoints == [date(2042, 7, 6), date(2042, 6, 29)]
     assert first.backfill_complete is False
     assert second.backfill_complete is False
 
@@ -69,9 +113,9 @@ async def test_recreated_coordinator_resumes_from_durable_checkpoint(hass) -> No
 
     await coordinator.async_backfill_step()
 
-    assert store.backfill_cursor == date(2042, 5, 12)
+    assert store.backfill_cursor == date(2042, 6, 5)
     first_window = next(call for call in client.calls if call[0] == "all-sources")
-    assert first_window[2] == datetime(2042, 5, 12, tzinfo=UTC)
+    assert first_window[2] == datetime(2042, 6, 5, tzinfo=UTC)
     assert first_window[3] == datetime(2042, 6, 12, tzinfo=UTC)
 
 
@@ -92,7 +136,7 @@ async def test_failed_window_does_not_advance_checkpoint(hass) -> None:
 
 async def test_raw_failure_with_successful_reconciliation_retries_same_window(hass) -> None:
     now = datetime(2042, 7, 13, 15, 0, tzinfo=UTC)
-    returned_day = date(2042, 6, 15)
+    returned_day = date(2042, 7, 10)
     client = FakeClient()
     client.raw["steps"] = [_steps(returned_day, 6900)]
     client.all_sources["steps"] = [_steps(returned_day, 7000)]
@@ -144,7 +188,7 @@ async def test_cancelled_backfill_releases_lock_without_advancing_checkpoint(has
 
 async def test_cancellation_after_row_upsert_leaves_checkpoint_for_idempotent_retry(hass) -> None:
     now = datetime(2042, 7, 13, 15, 0, tzinfo=UTC)
-    returned_day = date(2042, 6, 15)
+    returned_day = date(2042, 7, 10)
     client = FakeClient()
     client.all_sources["steps"] = [_steps(returned_day, 7000)]
     store = FakeStore()
@@ -170,13 +214,13 @@ async def test_cancellation_after_row_upsert_leaves_checkpoint_for_idempotent_re
     assert [day for day, row in store.rows.items() if row.steps is not None] == [
         returned_day
     ]
-    assert store.backfill_cursor == date(2042, 6, 12)
+    assert store.backfill_cursor == date(2042, 7, 6)
 
 
 async def test_cancellation_during_committed_checkpoint_keeps_states_consistent(hass) -> None:
     now = datetime(2042, 7, 13, 15, 0, tzinfo=UTC)
-    returned_day = date(2042, 6, 15)
-    expected_cursor = date(2042, 6, 12)
+    returned_day = date(2042, 7, 10)
+    expected_cursor = date(2042, 7, 6)
     client = FakeClient()
     client.all_sources["steps"] = [_steps(returned_day, 7000)]
     store = FakeStore()
@@ -242,7 +286,7 @@ async def test_backfill_stops_at_twenty_year_provider_boundary(hass) -> None:
 
 async def test_backfill_late_correction_replaces_existing_day(hass) -> None:
     now = datetime(2042, 7, 13, 15, 0, tzinfo=UTC)
-    corrected_day = date(2042, 6, 15)
+    corrected_day = date(2042, 7, 10)
     store = FakeStore()
     client = FakeClient()
     client.all_sources["steps"] = [_steps(corrected_day, 7000)]
@@ -261,7 +305,7 @@ async def test_backfill_late_correction_replaces_existing_day(hass) -> None:
 
 async def test_core_backfill_preserves_existing_expanded_metrics(hass) -> None:
     now = datetime(2042, 7, 13, 15, 0, tzinfo=UTC)
-    returned_day = date(2042, 6, 15)
+    returned_day = date(2042, 7, 10)
     store = FakeStore(
         [
             DailySummary(

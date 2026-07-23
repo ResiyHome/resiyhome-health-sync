@@ -1194,7 +1194,7 @@ async def test_current_refresh_runs_between_core_and_expanded_backfill_windows(
     core_index = next(
         index
         for index, call in enumerate(client.calls)
-        if call[:2] == ("all-sources", "steps") and call[3] - call[2] == timedelta(days=31)
+        if call[:2] == ("all-sources", "steps") and call[3] - call[2] == timedelta(days=7)
     )
     current_index = next(
         index

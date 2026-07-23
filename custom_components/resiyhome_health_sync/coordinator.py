@@ -38,7 +38,7 @@ from .storage import HealthHistoryStore
 _LOGGER = logging.getLogger(__name__)
 
 _STALE_AFTER = timedelta(minutes=45)
-_BACKFILL_WINDOW_DAYS = 31
+_BACKFILL_WINDOW_DAYS = 7
 _PROVIDER_HISTORY_YEARS = 20
 _EXPANDED_BACKFILL_DAYS = 90
 _EXPANDED_BACKFILL_WINDOW_DAYS = 14
