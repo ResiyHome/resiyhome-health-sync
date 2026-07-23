@@ -35,7 +35,7 @@ separate operations with separate retention behavior:
 - **Config-entry removal:** stops polling for that person and removes active entities.
 - **Recorder data:** remains subject to Home Assistant Recorder retention and purge
   settings.
-- **Normalized integration storage:** is retained by Health Sync 1.0.0 when an entry is
+- **Normalized integration storage:** is retained by Health Sync when an entry is
   unloaded or removed.
 - **OAuth revocation:** is controlled from the person's Google Account and is not caused
   by Home Assistant removal.
@@ -53,12 +53,12 @@ Then:
 4. Review Home Assistant Recorder data and backups separately.
 
 Removing or unloading a config entry stops polling and removes its active entities, but
-Health Sync 1.0.0 does not automatically purge the integration's private normalized
+Health Sync does not automatically purge the integration's private normalized
 history file, Home Assistant Recorder rows, or backups. This prevents an ordinary unload
 or reauthentication from destroying history, but it also means entry removal alone is not
 complete erasure.
 
-Health Sync 1.0.0 does not currently provide a supported normalized-store erasure path.
+Health Sync does not currently provide a supported normalized-store erasure path.
 Do not edit or delete Home Assistant internal storage directly and do not guess at files;
 doing so can damage Home Assistant or affect another person's data. Create a backup first,
 remove only the intended config entry through Home Assistant, and request support for

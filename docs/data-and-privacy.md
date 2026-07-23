@@ -38,7 +38,8 @@ a reconciled sample only when that person opts in.
 
 The private per-entry store contains normalized daily summaries, source classification,
 completion metadata, backfill cursors, and the body-measurement option state. Core history
-is imported in resumable 31-day windows up to Google's 20-year provider boundary.
+is imported in resumable seven-day windows up to Google's 20-year provider boundary. The
+smaller window keeps high-volume heart-rate history within Google Health pagination limits.
 Expanded metrics use a bounded 90-day backfill in 14-day windows.
 
 Weight is excluded unless `include_body_measurements` is enabled for that person. Enabling

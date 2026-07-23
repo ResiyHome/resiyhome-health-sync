@@ -2,6 +2,22 @@
 
 All notable public changes to Health Sync by ResiyHome are recorded here.
 
+## 1.0.1 - 2026-07-22
+
+### Fixed
+
+- Reduced core history backfill requests from 31-day to seven-day windows so high-volume
+  heart-rate history remains below Google Health pagination safety limits.
+- Prevented an oversized history window from repeatedly retrying without advancing its
+  durable backfill checkpoint.
+
+### Upgrade
+
+- No configuration or OAuth changes are required. Install the update completely through
+  HACS, then restart Home Assistant once.
+- Existing person entries, entity IDs, recorder history, and normalized integration history
+  are preserved.
+
 ## 1.0.0 - 2026-07-22
 
 ### Added

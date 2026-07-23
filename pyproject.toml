@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "resiyhome-health-sync"
-version = "1.0.0"
+version = "1.0.1"
 description = "Read-only Google Health integration for Home Assistant"
 requires-python = ">=3.14.2"
 dependencies = []

@@ -133,7 +133,7 @@ def test_readme_uses_the_v1_public_release_identity() -> None:
     assert readme.index("assets/health-sync-by-resiyhome.png") < readme.index(
         "# Health Sync by ResiyHome"
     )
-    assert "Release 1.0.0" in readme
+    assert "Release 1.0.1" in readme
     assert "0.3.0" not in readme
 
 
@@ -294,6 +294,15 @@ def test_changelog_documents_expanded_metrics_and_backfill_release() -> None:
     assert "strict normalized history validation" in release
 
 
+def test_changelog_documents_bounded_backfill_fix() -> None:
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    release = changelog.split("## 1.0.1", maxsplit=1)[1].split("## 1.0.0", maxsplit=1)[0]
+
+    assert "seven-day windows" in release
+    assert "pagination safety limits" in release
+    assert "restart Home Assistant once" in release
+
+
 def test_fixture_provenance_is_documented() -> None:
     provenance = (ROOT / "tests" / "fixtures" / "README.md").read_text(encoding="utf-8")
     normalized = " ".join(provenance.split())
@@ -397,7 +406,7 @@ def test_manifest_versions_expanded_metrics_release() -> None:
         )
     )
 
-    assert manifest["version"] == "1.0.0"
+    assert manifest["version"] == "1.0.1"
 
 
 def test_gitignore_blocks_credential_artifacts() -> None:
