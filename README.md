@@ -3,7 +3,7 @@
 # Health Sync by ResiyHome
 
 Health Sync is a read-only Home Assistant custom integration that turns a person's
-Google Health data into person-scoped entities and normalized daily history. Release 1.0.2
+Google Health data into person-scoped entities and normalized daily history. Release 1.0.3
 polls Google every 15 minutes, supports multiple independently authorized people,
 and keeps OAuth under the user's control.
 

@@ -2,6 +2,22 @@
 
 All notable public changes to Health Sync by ResiyHome are recorded here.
 
+## 1.0.3 - 2026-07-26
+
+### Fixed
+
+- Accepted Google Health daily rollup responses that end at `23:59:59` on the
+  same civil date, matching Google's documented response format.
+- Preserved support for daily rollups that end at midnight on the following
+  civil date.
+
+### Upgrade
+
+- No configuration, OAuth, entity ID, or history migration is required.
+- Install the update completely through HACS, then restart Home Assistant once.
+- After restart, use the Health Sync refresh action or wait for the next
+  15-minute poll.
+
 ## 1.0.2 - 2026-07-26
 
 ### Fixed

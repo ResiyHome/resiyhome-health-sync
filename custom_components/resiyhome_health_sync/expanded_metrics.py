@@ -350,10 +350,11 @@ def _rollup_window_matches_day(point: Mapping[str, object], day: date) -> bool:
     start = _civil_date_time(point.get("civilStartTime"))
     end = _civil_date_time(point.get("civilEndTime"))
     start_of_day = datetime(day.year, day.month, day.day)
-    return start == (start_of_day, 0) and end == (
-        start_of_day + timedelta(days=1),
-        0,
-    )
+    valid_ends = {
+        (start_of_day + timedelta(hours=23, minutes=59, seconds=59), 0),
+        (start_of_day + timedelta(days=1), 0),
+    }
+    return start == (start_of_day, 0) and end in valid_ends
 
 
 def _civil_date_time(value: object) -> tuple[datetime, int] | None:

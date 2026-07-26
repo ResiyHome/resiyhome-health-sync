@@ -213,6 +213,26 @@ def test_multi_day_streams_are_filtered_before_single_point_validation() -> None
     assert (current.vo2_max, current.floors) == (42.5, 7)
 
 
+def test_daily_rollup_accepts_documented_end_of_day_boundary() -> None:
+    """Google may return 23:59:59 as the civil end of a one-day rollup."""
+    rollups = {
+        "floors": [
+            {
+                "civilStartTime": _civil_time(DAY, 0),
+                "civilEndTime": {
+                    "date": _daily_date(),
+                    "time": {"hours": 23, "minutes": 59, "seconds": 59},
+                },
+                "floors": {"countSum": "7"},
+            }
+        ]
+    }
+
+    result = normalize_expanded_day(DAY, {}, rollups, include_weight=False)
+
+    assert result.floors == 7
+
+
 def test_expanded_model_is_immutable_and_daily_summary_defaults_to_it() -> None:
     """Expanded contracts cannot share mutable mappings or break old summary construction."""
     metrics = ExpandedDailyMetrics(active_zone_minutes={"fat_burn": 12.0})

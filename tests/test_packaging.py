@@ -133,7 +133,7 @@ def test_readme_uses_the_current_public_release_identity() -> None:
     assert readme.index("assets/health-sync-by-resiyhome.png") < readme.index(
         "# Health Sync by ResiyHome"
     )
-    assert "Release 1.0.2" in readme
+    assert "Release 1.0.3" in readme
     assert "0.3.0" not in readme
 
 
@@ -399,14 +399,14 @@ def test_readme_documents_exactly_one_post_download_restart() -> None:
     )
 
 
-def test_manifest_versions_daily_rollup_fix_release() -> None:
+def test_manifest_versions_daily_rollup_boundary_fix_release() -> None:
     manifest = json.loads(
         (ROOT / "custom_components" / "resiyhome_health_sync" / "manifest.json").read_text(
             encoding="utf-8"
         )
     )
 
-    assert manifest["version"] == "1.0.2"
+    assert manifest["version"] == "1.0.3"
 
 
 def test_gitignore_blocks_credential_artifacts() -> None:
