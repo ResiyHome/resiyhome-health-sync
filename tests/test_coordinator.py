@@ -499,7 +499,7 @@ async def test_partial_metric_failure_preserves_only_failed_group(
     assert store.rows[now.date()] == snapshot.current_day
 
 
-async def test_current_refresh_uses_reconciled_daily_records_and_daily_rollups_only(
+async def test_current_refresh_uses_reconciled_records_with_daily_rollup_precedence(
     coordinator, client: FakeClient, now: datetime
 ) -> None:
     client.all_sources["daily-oxygen-saturation"] = [
@@ -538,21 +538,31 @@ async def test_current_refresh_uses_reconciled_daily_records_and_daily_rollups_o
         "time-in-heart-rate-zone",
         "calories-in-heart-rate-zone",
     )
+    expected_current_interval_fallbacks = (
+        "active-zone-minutes",
+        "floors",
+        "sedentary-period",
+        "time-in-heart-rate-zone",
+    )
     expected_calls = Counter(
         [("raw", data_type) for data_type in coordinator.data_types]
         + [("all-sources", data_type) for data_type in coordinator.data_types]
         + [("google-wearables", "steps")]
         + [("all-sources", data_type) for data_type in expected_direct]
+        + [("all-sources", data_type) for data_type in expected_current_interval_fallbacks]
         + [("daily-rollup-all-sources", data_type) for data_type in expected_rollups]
     )
     actual_calls = Counter((family, data_type) for family, data_type, _, _ in client.calls)
 
     assert actual_calls == expected_calls
-    assert len(client.calls) == 31
+    assert len(client.calls) == 35
     assert all(end - start == timedelta(days=1) for _, _, start, end in client.calls)
     assert not any(
-        data_type in {"oxygen-saturation", "time-in-heart-rate-zone"}
-        and family != "daily-rollup-all-sources"
+        data_type == "oxygen-saturation"
+        or (
+            data_type == "time-in-heart-rate-zone"
+            and family not in {"all-sources", "daily-rollup-all-sources"}
+        )
         for family, data_type, _start, _end in client.calls
     )
 
@@ -941,6 +951,35 @@ async def test_missing_current_source_records_log_redacted_fetch_diagnostics(
     assert "1700" not in caplog.text
     assert "access_token" not in caplog.text
     assert "refresh_token" not in caplog.text
+
+
+async def test_missing_expanded_rollups_log_only_redacted_shape_diagnostics(
+    hass, caplog, client: FakeClient, store: FakeStore, now: datetime
+) -> None:
+    """Expanded diagnostics expose counts and availability, never health values."""
+    caplog.set_level(logging.WARNING, logger="custom_components.resiyhome_health_sync.coordinator")
+    client.all_sources["active-zone-minutes"] = [
+        {
+            "activeZoneMinutes": {
+                "interval": {
+                    "startTime": "2042-07-13T12:00:00Z",
+                    "startUtcOffset": "0s",
+                    "endTime": "2042-07-13T12:01:00Z",
+                    "endUtcOffset": "0s",
+                },
+                "heartRateZone": "FAT_BURN",
+                "activeZoneMinutes": "private_health_value",
+            }
+        }
+    ]
+    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+
+    await coordinator.async_manual_refresh()
+
+    assert "Expanded diagnostics for current refresh" in caplog.text
+    assert "direct_counts=(active-zone-minutes=1" in caplog.text
+    assert "rollup_counts=(active-zone-minutes=0" in caplog.text
+    assert "private_health_value" not in caplog.text
 
 
 async def test_optional_probe_logs_only_counts_and_source_labels(

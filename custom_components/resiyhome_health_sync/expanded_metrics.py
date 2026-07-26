@@ -59,7 +59,7 @@ def normalize_expanded_day(
         sleep_respiratory_signal_to_noise,
     ) = _sleep_respiratory_rate(direct, day)
     return ExpandedDailyMetrics(
-        active_zone_minutes=_active_zone_minutes(rollups, day),
+        active_zone_minutes=_active_zone_minutes(direct, rollups, day),
         vo2_max=vo2_max,
         vo2_estimated=vo2_estimated,
         cardio_fitness_level=cardio_fitness_level,
@@ -71,32 +71,45 @@ def normalize_expanded_day(
         sleep_respiratory_rates=sleep_respiratory_rates,
         sleep_respiratory_standard_deviation=sleep_respiratory_standard_deviation,
         sleep_respiratory_signal_to_noise=sleep_respiratory_signal_to_noise,
-        floors=_floors(rollups, day),
-        sedentary_minutes=_sedentary_minutes(rollups, day),
-        heart_zone_minutes=_heart_zone_minutes(rollups, day),
+        floors=_floors(direct, rollups, day),
+        sedentary_minutes=_sedentary_minutes(direct, rollups, day),
+        heart_zone_minutes=_heart_zone_minutes(direct, rollups, day),
         heart_zone_thresholds=_heart_zone_thresholds(direct, day),
         heart_zone_calories=_heart_zone_calories(rollups, day),
         weight_kg=_weight(direct, day) if include_weight else None,
     )
 
 
-def _active_zone_minutes(stream: DataPointStreams, day: date) -> Mapping[str, float]:
+def _active_zone_minutes(
+    direct: DataPointStreams, rollups: DataPointStreams, day: date
+) -> Mapping[str, float]:
     """Read the three documented active-zone daily-rollup fields together."""
-    payload = _single_rollup_payload(stream, "active-zone-minutes", "activeZoneMinutes", day)
-    if payload is None:
-        return {}
-    fields = {
-        "FAT_BURN": "sumInFatBurnHeartZone",
-        "CARDIO": "sumInCardioHeartZone",
-        "PEAK": "sumInPeakHeartZone",
-    }
-    values: dict[str, float] = {}
-    for source_zone, field in fields.items():
-        value = _non_negative_integer(payload.get(field))
-        if value is None:
-            return {}
-        values[ACTIVE_ZONES[source_zone]] = float(value)
-    return values
+    payload = _single_rollup_payload(
+        rollups, "active-zone-minutes", "activeZoneMinutes", day
+    )
+    if payload is not None:
+        fields = {
+            "FAT_BURN": "sumInFatBurnHeartZone",
+            "CARDIO": "sumInCardioHeartZone",
+            "PEAK": "sumInPeakHeartZone",
+        }
+        values: dict[str, float] = {}
+        for source_zone, field in fields.items():
+            value = _non_negative_integer(payload.get(field))
+            if value is None:
+                return {}
+            values[ACTIVE_ZONES[source_zone]] = float(value)
+        return values
+    return _sum_interval_values(
+        direct,
+        "active-zone-minutes",
+        "activeZoneMinutes",
+        "heartRateZone",
+        "activeZoneMinutes",
+        ACTIVE_ZONES,
+        day,
+        _non_negative_integer,
+    )
 
 
 def _daily_vo2_max(
@@ -194,26 +207,134 @@ def _sleep_statistic(
     return breaths, standard_deviation, signal_to_noise
 
 
-def _floors(stream: DataPointStreams, day: date) -> int | None:
+def _floors(
+    direct: DataPointStreams, rollups: DataPointStreams, day: date
+) -> int | None:
     """Read the integer floors daily rollup."""
-    payload = _single_rollup_payload(stream, "floors", "floors", day)
-    return _non_negative_integer(payload.get("countSum")) if payload is not None else None
+    payload = _single_rollup_payload(rollups, "floors", "floors", day)
+    if payload is not None:
+        return _non_negative_integer(payload.get("countSum"))
+    values = _interval_payloads(direct, "floors", "floors", day)
+    if not values:
+        return None
+    total = 0
+    for value, _duration in values:
+        count = _non_negative_integer(value.get("count"))
+        if count is None:
+            return None
+        total += count
+        if total > _INT64_MAX:
+            return None
+    return total
 
 
-def _sedentary_minutes(stream: DataPointStreams, day: date) -> float | None:
+def _sedentary_minutes(
+    direct: DataPointStreams, rollups: DataPointStreams, day: date
+) -> float | None:
     """Convert the total sedentary protobuf duration to minutes."""
-    payload = _single_rollup_payload(stream, "sedentary-period", "sedentaryPeriod", day)
-    seconds = _duration_seconds(payload.get("durationSum")) if payload is not None else None
+    payload = _single_rollup_payload(
+        rollups, "sedentary-period", "sedentaryPeriod", day
+    )
+    if payload is not None:
+        seconds = _duration_seconds(payload.get("durationSum"))
+    else:
+        values = _interval_payloads(
+            direct, "sedentary-period", "sedentaryPeriod", day
+        )
+        seconds = sum(duration for _value, duration in values) if values else None
     if seconds is None:
         return None
     minutes = seconds / 60
     return minutes if isfinite(minutes) else None
 
 
-def _heart_zone_minutes(stream: DataPointStreams, day: date) -> Mapping[str, float]:
+def _heart_zone_minutes(
+    direct: DataPointStreams, rollups: DataPointStreams, day: date
+) -> Mapping[str, float]:
     """Convert per-zone daily rollup durations to minutes."""
-    payload = _single_rollup_payload(stream, "time-in-heart-rate-zone", "timeInHeartRateZone", day)
-    return _heart_zone_values(payload, "timeInHeartRateZones", "duration", _duration_minutes)
+    payload = _single_rollup_payload(
+        rollups, "time-in-heart-rate-zone", "timeInHeartRateZone", day
+    )
+    if payload is not None:
+        return _heart_zone_values(
+            payload, "timeInHeartRateZones", "duration", _duration_minutes
+        )
+    values = _interval_payloads(
+        direct,
+        "time-in-heart-rate-zone",
+        "timeInHeartRateZone",
+        day,
+    )
+    result: dict[str, float] = {}
+    for value, duration in values:
+        zone = value.get("heartRateZoneType")
+        if not isinstance(zone, str) or zone not in HEART_ZONES:
+            return {}
+        normalized_zone = HEART_ZONES[zone]
+        result[normalized_zone] = result.get(normalized_zone, 0.0) + duration / 60
+    return result
+
+
+def _sum_interval_values(
+    stream: DataPointStreams,
+    data_type: str,
+    payload_key: str,
+    group_key: str,
+    value_key: str,
+    groups: Mapping[str, str],
+    day: date,
+    parser: Callable[[object], int | None],
+) -> Mapping[str, float]:
+    """Sum reconciled interval values by an allowlisted API group."""
+    values = _interval_payloads(stream, data_type, payload_key, day)
+    result: dict[str, float] = {}
+    for payload, _duration in values:
+        group = payload.get(group_key)
+        value = parser(payload.get(value_key))
+        if not isinstance(group, str) or group not in groups or value is None:
+            return {}
+        normalized_group = groups[group]
+        result[normalized_group] = result.get(normalized_group, 0.0) + value
+    return result
+
+
+def _interval_payloads(
+    stream: DataPointStreams,
+    data_type: str,
+    payload_key: str,
+    day: date,
+) -> list[tuple[Mapping[str, object], float]]:
+    """Return validated reconciled interval payloads that begin on one civil day."""
+    points = _sequence(stream.get(data_type))
+    if not points:
+        return []
+    result: list[tuple[Mapping[str, object], float]] = []
+    for point in points:
+        mapped = _mapping(point)
+        payload = _mapping(mapped.get(payload_key)) if mapped is not None else None
+        if payload is None:
+            return []
+        interval = _mapping(payload.get("interval"))
+        if interval is None:
+            return []
+        start = _sample_timestamp(
+            {
+                "physicalTime": interval.get("startTime"),
+                "utcOffset": interval.get("startUtcOffset"),
+            }
+        )
+        end = _sample_timestamp(
+            {
+                "physicalTime": interval.get("endTime"),
+                "utcOffset": interval.get("endUtcOffset"),
+            }
+        )
+        if start is None or end is None or start[0] >= end[0]:
+            return []
+        if start[1] != day:
+            continue
+        result.append((payload, (end[0] - start[0]).total_seconds()))
+    return result
 
 
 def _heart_zone_thresholds(stream: DataPointStreams, day: date) -> Mapping[str, tuple[int, int]]:

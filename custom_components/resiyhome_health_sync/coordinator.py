@@ -73,6 +73,13 @@ _EXPANDED_ROLLUP_TYPES: tuple[str, ...] = (
     "calories-in-heart-rate-zone",
 )
 
+_EXPANDED_CURRENT_INTERVAL_TYPES: tuple[str, ...] = (
+    "active-zone-minutes",
+    "floors",
+    "sedentary-period",
+    "time-in-heart-rate-zone",
+)
+
 _EXPANDED_GROUP_FIELDS: Mapping[str, tuple[str, ...]] = {
     "daily-vo2-max": ("vo2_max", "vo2_estimated", "cardio_fitness_level"),
     "daily-oxygen-saturation": (
@@ -197,6 +204,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         self._history_loaded = False
         self._last_sleep_diagnostic: tuple[object, ...] | None = None
         self._last_fetch_diagnostic: tuple[object, ...] | None = None
+        self._last_expanded_diagnostic: tuple[object, ...] | None = None
 
     @property
     def data_types(self) -> tuple[str, ...]:
@@ -516,7 +524,11 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
 
         try:
             streams, successful_types, raw_complete = await self._async_fetch_window(start, end)
-            expanded = await self._async_fetch_expanded_window(start, end)
+            expanded = await self._async_fetch_expanded_window(
+                start,
+                end,
+                include_current_intervals=True,
+            )
         except AuthenticationError:
             self.data.authorization_healthy = False
             raise
@@ -559,6 +571,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
             expanded.rollups,
             include_weight=self._include_body_measurements,
         )
+        self._log_expanded_diagnostics(day, expanded, normalized_expanded)
         current = replace(
             current,
             expanded=_merge_partial_expanded(
@@ -676,6 +689,43 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
             normalized.exercise_minutes is not None,
         )
 
+    def _log_expanded_diagnostics(
+        self,
+        day: date,
+        expanded: _ExpandedWindowResult,
+        normalized: ExpandedDailyMetrics,
+    ) -> None:
+        """Log value-free fetch shape when current expanded metrics are missing."""
+        availability = (
+            f"active_zone_minutes={bool(normalized.active_zone_minutes)}",
+            f"floors={normalized.floors is not None}",
+            f"sedentary_minutes={normalized.sedentary_minutes is not None}",
+            f"heart_zone_minutes={bool(normalized.heart_zone_minutes)}",
+        )
+        if all(item.endswith("=True") for item in availability):
+            return
+        direct_counts = tuple(
+            f"{data_type}={len(expanded.direct.get(data_type, ()))}"
+            for data_type in _EXPANDED_CURRENT_INTERVAL_TYPES
+        )
+        rollup_counts = tuple(
+            f"{data_type}={len(expanded.rollups.get(data_type, ()))}"
+            for data_type in _EXPANDED_ROLLUP_TYPES
+        )
+        signature = (day, direct_counts, rollup_counts, availability)
+        if signature == self._last_expanded_diagnostic:
+            return
+        self._last_expanded_diagnostic = signature
+        _LOGGER.warning(
+            "Expanded diagnostics for current refresh: "
+            "day=%s successful_types=%s direct_counts=%s rollup_counts=%s availability=%s",
+            day.isoformat(),
+            _format_sequence(tuple(sorted(expanded.successful_types))),
+            _format_sequence(direct_counts),
+            _format_sequence(rollup_counts),
+            _format_sequence(availability),
+        )
+
     async def _async_ensure_history_loaded(self) -> None:
         if self._history_loaded:
             return
@@ -776,17 +826,23 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         )
 
     async def _async_fetch_expanded_window(
-        self, start: datetime, end: datetime
+        self,
+        start: datetime,
+        end: datetime,
+        *,
+        include_current_intervals: bool = False,
     ) -> _ExpandedWindowResult:
         direct: dict[str, Sequence[DataPoint]] = {}
         rollups: dict[str, Sequence[DataPoint]] = {}
         successful_types: set[str] = set()
 
-        direct_types = (
+        direct_types: tuple[str, ...] = (
             (*_EXPANDED_DIRECT_TYPES, "weight")
             if self._include_body_measurements
             else _EXPANDED_DIRECT_TYPES
         )
+        if include_current_intervals:
+            direct_types = (*direct_types, *_EXPANDED_CURRENT_INTERVAL_TYPES)
         for data_type in direct_types:
             try:
                 direct[data_type] = await self.client.async_reconcile_data_points(
