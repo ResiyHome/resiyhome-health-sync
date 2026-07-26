@@ -2,6 +2,36 @@
 
 All notable public changes to Health Sync by ResiyHome are recorded here.
 
+## 1.0.4 - 2026-07-26
+
+### Fixed
+
+- Restored current-day active-zone minutes, floors, sedentary minutes, and
+  heart-rate-zone minutes when Google has reconciled interval records but has
+  not yet published the corresponding daily rollups.
+- Kept Google's daily rollups authoritative whenever they are available, while
+  retaining the reconciled interval fallback only for an incomplete current day.
+- Added value-free diagnostics that report response counts and metric
+  availability without logging health values, OAuth credentials, identifiers,
+  or raw API payloads.
+
+### Verified
+
+- Confirmed the fallback against live Google Health data for three enrolled
+  people. Active-zone, sedentary, and heart-rate-zone sensors populated for all
+  three; floor sensors populated where Google returned current-day floor
+  records. The reference person's values remained populated after a second
+  manual refresh.
+- Confirmed the complete automated suite with 610 passing tests, Ruff, Python
+  compilation, and Home Assistant configuration validation.
+
+### Upgrade
+
+- No configuration, OAuth, entity ID, or history migration is required.
+- Install the update completely through HACS, then restart Home Assistant once.
+- After restart, use the Health Sync refresh action or wait for the next
+  15-minute poll.
+
 ## 1.0.3 - 2026-07-26
 
 ### Fixed

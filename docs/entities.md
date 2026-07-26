@@ -10,7 +10,9 @@ name to the generated entity ID.
   entity registry until the user enables them.
 - **Reconciled:** Values come from Google's all-source reconcile result. Raw records are
   used only to classify source platforms, never summed into health values.
-- **Rollup:** Values come from Google's all-source daily rollup.
+- **Rollup:** Values come from Google's all-source daily rollup. Current-day
+  interval fallbacks are used only where the catalog explicitly says so, and a
+  published rollup takes precedence.
 - **Partial failure:** A failed metric group keeps its prior normalized value when one
   exists. A first fetch with no usable value is unavailable.
 - **Zero:** A valid provider zero remains zero. Missing, malformed, incomplete, or absent
@@ -46,14 +48,14 @@ does not connect directly to Apple Health.
 
 | Runtime key | Name | Unit | Default | Source and fallback |
 | --- | --- | --- | --- | --- |
-| `active_zone_minutes_today` | Active zone minutes today | min | Enabled | Sum of complete fat-burn, cardio, and peak daily-rollup fields |
+| `active_zone_minutes_today` | Active zone minutes today | min | Enabled | Sum of fat-burn, cardio, and peak daily-rollup fields; reconciled current-day intervals until the rollup is published |
 | `daily_vo2_max` | Daily VO2 max | mL/kg/min | Enabled | One complete reconciled daily summary; exposes fitness level and estimated metadata when present |
 | `daily_oxygen_saturation` | Daily oxygen saturation | % | Enabled | One complete reconciled daily summary; requires valid average, bounds, and standard deviation |
 | `daily_respiratory_rate` | Daily respiratory rate | breaths/min | Enabled | One complete reconciled daily summary |
 | `sleep_respiratory_rate` | Sleep respiratory rate | breaths/min | Enabled | Complete full-sleep reconciled summary; exposes standard deviation and signal-to-noise metadata |
-| `floors_today` | Floors today | floors | Enabled | All-source daily rollup |
-| `sedentary_minutes_today` | Sedentary minutes today | min | Enabled | All-source daily rollup converted from duration |
-| `heart_rate_zone_minutes_today` | Heart rate zone minutes today | min | Enabled | Sum of available all-source heart-zone daily-rollup durations |
+| `floors_today` | Floors today | floors | Enabled | All-source daily rollup; sum of reconciled current-day floor intervals until the rollup is published |
+| `sedentary_minutes_today` | Sedentary minutes today | min | Enabled | All-source daily rollup converted from duration; sum of reconciled current-day interval durations until the rollup is published |
+| `heart_rate_zone_minutes_today` | Heart rate zone minutes today | min | Enabled | Sum of available all-source heart-zone daily-rollup durations; reconciled current-day interval durations until the rollup is published |
 
 Expanded groups use no substitute metric when their required response shape is missing or
 invalid. A partial refresh preserves the prior normalized group; otherwise the entity is
@@ -63,13 +65,13 @@ unavailable.
 
 | Runtime key | Name | Unit | Default | Source and fallback |
 | --- | --- | --- | --- | --- |
-| `active_zone_fat_burn_minutes_today` | Active zone fat burn minutes today | min | Disabled | Fat-burn field from complete active-zone daily rollup |
-| `active_zone_cardio_minutes_today` | Active zone cardio minutes today | min | Disabled | Cardio field from complete active-zone daily rollup |
-| `active_zone_peak_minutes_today` | Active zone peak minutes today | min | Disabled | Peak field from complete active-zone daily rollup |
-| `heart_rate_zone_light_minutes_today` | Heart rate zone light minutes today | min | Disabled | Light-zone daily rollup; threshold attributes from reconciled daily zones when available |
-| `heart_rate_zone_moderate_minutes_today` | Heart rate zone moderate minutes today | min | Disabled | Moderate-zone daily rollup; threshold attributes from reconciled daily zones when available |
-| `heart_rate_zone_vigorous_minutes_today` | Heart rate zone vigorous minutes today | min | Disabled | Vigorous-zone daily rollup; threshold attributes from reconciled daily zones when available |
-| `heart_rate_zone_peak_minutes_today` | Heart rate zone peak minutes today | min | Disabled | Peak-zone daily rollup; threshold attributes from reconciled daily zones when available |
+| `active_zone_fat_burn_minutes_today` | Active zone fat burn minutes today | min | Disabled | Fat-burn rollup field with reconciled current-day interval fallback |
+| `active_zone_cardio_minutes_today` | Active zone cardio minutes today | min | Disabled | Cardio rollup field with reconciled current-day interval fallback |
+| `active_zone_peak_minutes_today` | Active zone peak minutes today | min | Disabled | Peak rollup field with reconciled current-day interval fallback |
+| `heart_rate_zone_light_minutes_today` | Heart rate zone light minutes today | min | Disabled | Light-zone rollup with reconciled current-day interval fallback; threshold attributes from reconciled daily zones when available |
+| `heart_rate_zone_moderate_minutes_today` | Heart rate zone moderate minutes today | min | Disabled | Moderate-zone rollup with reconciled current-day interval fallback; threshold attributes from reconciled daily zones when available |
+| `heart_rate_zone_vigorous_minutes_today` | Heart rate zone vigorous minutes today | min | Disabled | Vigorous-zone rollup with reconciled current-day interval fallback; threshold attributes from reconciled daily zones when available |
+| `heart_rate_zone_peak_minutes_today` | Heart rate zone peak minutes today | min | Disabled | Peak-zone rollup with reconciled current-day interval fallback; threshold attributes from reconciled daily zones when available |
 | `sleep_deep_respiratory_rate` | Sleep deep respiratory rate | breaths/min | Disabled | Deep-phase value from complete sleep respiratory summary |
 | `sleep_light_respiratory_rate` | Sleep light respiratory rate | breaths/min | Disabled | Light-phase value from complete sleep respiratory summary |
 | `sleep_rem_respiratory_rate` | Sleep rem respiratory rate | breaths/min | Disabled | REM-phase value from complete sleep respiratory summary |

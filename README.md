@@ -93,16 +93,20 @@ entity, its state may be unavailable until body measurements are opted in and Go
 supplies usable data. A valid zero is retained as data; unavailable means no usable value
 was obtained, not that the entity is disabled.
 
-Expanded metrics use reconciled daily summaries and daily rollups.
+Expanded metrics use reconciled daily summaries and daily rollups. For the
+current day, active-zone minutes, floors, sedentary minutes, and
+heart-rate-zone minutes use reconciled intervals until Google publishes the
+daily rollup. A published daily rollup takes precedence.
 Only expanded-metric polling avoids raw high-volume streams; core source attribution transiently inspects raw records.
 Neither path stores raw API payloads or Google identifiers.
 
 ## Refresh contract
 
-A fully successful, non-paginated refresh makes 31 logical data requests when body
-measurements are disabled and 32 when body measurements are enabled. This includes core
+A fully successful, non-paginated refresh makes 35 logical data requests when body
+measurements are disabled and 36 when body measurements are enabled. This includes core
 raw source-attribution requests, core and expanded reconciled requests, the wearable
-steps request, and expanded daily rollups. Pagination can increase the actual HTTP request count.
+steps request, current-day interval fallbacks, and expanded daily rollups.
+Pagination can increase the actual HTTP request count.
 A one-time authentication retry can add a token request.
 
 Authentication failure stops the remaining poll immediately; individual metric failures are isolated,

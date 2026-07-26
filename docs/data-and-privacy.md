@@ -31,8 +31,10 @@ Health Sync does not connect directly to Apple Health; HealthKit-derived data mu
 `mixed` means both wearable data and HealthKit evidence contributed to the day's source
 classification, not that the integration performed raw arithmetic.
 
-Expanded metrics use all-source reconciled daily summaries and daily rollups. Weight uses
-a reconciled sample only when that person opts in.
+Expanded metrics use all-source reconciled daily summaries and daily rollups. Active-zone
+minutes, floors, sedentary minutes, and heart-rate-zone minutes also use all-source
+reconciled intervals for the incomplete current day until Google publishes a daily
+rollup. Weight uses a reconciled sample only when that person opts in.
 
 ## What is stored
 
@@ -75,7 +77,7 @@ Authentication failure stops the remaining poll and starts Home Assistant's
 reauthentication path. A token refresh receives one retry. Non-authentication failures are
 isolated by metric group: successful groups update, while a failed group keeps its prior
 normalized value when available or remains unavailable. A fully successful,
-non-paginated current refresh uses 31 logical data requests, or 32 with weight enabled;
+non-paginated current refresh uses 35 logical data requests, or 36 with weight enabled;
 pagination and the authentication retry can increase actual HTTP traffic.
 
 Synchronization status is explicit: data is stale after 45 minutes without a successful

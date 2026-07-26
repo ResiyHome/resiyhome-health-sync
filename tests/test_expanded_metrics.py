@@ -1,6 +1,6 @@
 """Tests for pure expanded Google Health daily metric normalization."""
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from math import nan
 from types import MappingProxyType
 from typing import Any
@@ -35,6 +35,22 @@ def _rollup(value_key: str, value: object) -> dict[str, object]:
         "civilStartTime": _civil_time(DAY, 0),
         "civilEndTime": _civil_time(DAY + timedelta(days=1), 0),
         value_key: value,
+    }
+
+
+def _interval(
+    start_hour: int,
+    end_hour: int,
+) -> dict[str, object]:
+    start = datetime(DAY.year, DAY.month, DAY.day, start_hour, tzinfo=UTC)
+    end = datetime(DAY.year, DAY.month, DAY.day, end_hour, tzinfo=UTC)
+    return {
+        "startTime": start.isoformat().replace("+00:00", "Z"),
+        "startUtcOffset": "0s",
+        "endTime": end.isoformat().replace("+00:00", "Z"),
+        "endUtcOffset": "0s",
+        "civilStartTime": _civil_time(DAY, start_hour),
+        "civilEndTime": _civil_time(DAY, end_hour),
     }
 
 
@@ -173,6 +189,77 @@ def test_normalizes_documented_expanded_daily_metrics() -> None:
     assert result.heart_zone_thresholds["vigorous"] == (133, 159)
     assert result.heart_zone_calories["vigorous"] == 184.2
     assert result.weight_kg == 80.5
+
+
+def test_current_day_uses_reconciled_intervals_when_daily_rollups_are_empty() -> None:
+    """Incomplete current days remain available before Google publishes daily rollups."""
+    direct = _direct()
+    direct.update(
+        {
+            "active-zone-minutes": [
+                {
+                    "activeZoneMinutes": {
+                        "interval": _interval(8, 9),
+                        "heartRateZone": "FAT_BURN",
+                        "activeZoneMinutes": "5",
+                    }
+                },
+                {
+                    "activeZoneMinutes": {
+                        "interval": _interval(9, 10),
+                        "heartRateZone": "CARDIO",
+                        "activeZoneMinutes": "4",
+                    }
+                },
+            ],
+            "floors": [
+                {"floors": {"interval": _interval(10, 11), "count": "3"}},
+                {"floors": {"interval": _interval(11, 12), "count": "2"}},
+            ],
+            "sedentary-period": [
+                {"sedentaryPeriod": {"interval": _interval(12, 13)}},
+                {"sedentaryPeriod": {"interval": _interval(14, 16)}},
+            ],
+            "time-in-heart-rate-zone": [
+                {
+                    "timeInHeartRateZone": {
+                        "interval": _interval(16, 17),
+                        "heartRateZoneType": "MODERATE",
+                    }
+                },
+                {
+                    "timeInHeartRateZone": {
+                        "interval": _interval(17, 19),
+                        "heartRateZoneType": "VIGOROUS",
+                    }
+                },
+            ],
+        }
+    )
+
+    result = normalize_expanded_day(DAY, direct, {}, include_weight=False)
+
+    assert result.active_zone_minutes == {
+        "fat_burn": 5.0,
+        "cardio": 4.0,
+    }
+    assert result.floors == 5
+    assert result.sedentary_minutes == 180.0
+    assert result.heart_zone_minutes == {
+        "moderate": 60.0,
+        "vigorous": 120.0,
+    }
+
+
+def test_daily_rollups_take_precedence_over_reconciled_current_intervals() -> None:
+    """Published daily aggregates remain authoritative after Google creates them."""
+    direct = {
+        "floors": [{"floors": {"interval": _interval(10, 11), "count": "3"}}],
+    }
+
+    result = normalize_expanded_day(DAY, direct, _rollups(), include_weight=False)
+
+    assert result.floors == 7
 
 
 def test_multi_day_streams_are_filtered_before_single_point_validation() -> None:

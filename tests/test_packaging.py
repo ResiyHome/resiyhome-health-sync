@@ -175,8 +175,8 @@ def test_readme_documents_reconciliation_and_exact_poll_request_counts() -> None
     for documented_text in (
         "Google-reconciled all-source stream",
         "fully successful, non-paginated refresh",
-        "31 logical data requests",
-        "32 when body measurements are enabled",
+        "35 logical data requests",
+        "36 when body measurements are enabled",
         "one-time authentication retry",
         "Pagination can increase the actual HTTP request count",
         "Authentication failure stops the remaining poll immediately",
@@ -399,14 +399,14 @@ def test_readme_documents_exactly_one_post_download_restart() -> None:
     )
 
 
-def test_manifest_versions_daily_rollup_boundary_fix_release() -> None:
+def test_manifest_versions_current_day_interval_fallback_release() -> None:
     manifest = json.loads(
         (ROOT / "custom_components" / "resiyhome_health_sync" / "manifest.json").read_text(
             encoding="utf-8"
         )
     )
 
-    assert manifest["version"] == "1.0.3"
+    assert manifest["version"] == "1.0.4"
 
 
 def test_gitignore_blocks_credential_artifacts() -> None:
