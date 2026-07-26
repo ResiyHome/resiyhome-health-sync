@@ -300,6 +300,23 @@ def test_rollup_rejects_nonzero_midnight_nanos() -> None:
     assert result.floors == 7
 
 
+def test_rollup_accepts_civil_boundaries_with_omitted_midnight_time() -> None:
+    """Google may omit the optional CivilDateTime time field for midnight."""
+    rollups = _rollups()
+    rollups["floors"][0]["civilStartTime"] = {"date": _daily_date()}
+    rollups["floors"][0]["civilEndTime"] = {
+        "date": {
+            "year": (DAY + timedelta(days=1)).year,
+            "month": (DAY + timedelta(days=1)).month,
+            "day": (DAY + timedelta(days=1)).day,
+        }
+    }
+
+    result = normalize_expanded_day(DAY, _direct(), rollups, include_weight=False)
+
+    assert result.floors == 7
+
+
 def test_rollup_rejects_window_from_wrong_local_day() -> None:
     """An exact daily window for another civil day cannot populate this day."""
     rollups = _rollups()

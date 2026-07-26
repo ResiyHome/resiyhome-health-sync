@@ -2,6 +2,23 @@
 
 All notable public changes to Health Sync by ResiyHome are recorded here.
 
+## 1.0.2 - 2026-07-26
+
+### Fixed
+
+- Corrected the Google Health `dailyRollUp` request to use the documented
+  `CivilDateTime` structure. This restores active-zone minutes, floors, sedentary
+  minutes, and heart-rate-zone minute rollups when Google provides source data.
+- Accepted daily-rollup boundaries where Google omits the optional midnight time
+  object.
+
+### Upgrade
+
+- No configuration, OAuth, entity ID, or history migration is required.
+- Install the update completely through HACS, then restart Home Assistant once.
+- Daily oxygen saturation and daily VO2 max remain daily summary metrics and may
+  appear after Google finishes processing that day's source data.
+
 ## 1.0.1 - 2026-07-22
 
 ### Fixed

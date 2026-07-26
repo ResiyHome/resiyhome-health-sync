@@ -1,6 +1,6 @@
 # Installation
 
-Health Sync by ResiyHome 1.0.1 requires Home Assistant 2026.7.2 or newer, HACS, and a
+Health Sync by ResiyHome 1.0.2 requires Home Assistant 2026.7.2 or newer, HACS, and a
 user-owned Google Cloud OAuth client. It has no hosted or shared OAuth backend.
 
 ## Before you begin

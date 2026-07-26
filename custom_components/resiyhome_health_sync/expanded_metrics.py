@@ -360,7 +360,11 @@ def _civil_date_time(value: object) -> tuple[datetime, int] | None:
     """Parse a complete documented civil timestamp."""
     civil = _mapping(value)
     date_value = _mapping(civil.get("date")) if civil is not None else None
-    time_value = _mapping(civil.get("time")) if civil is not None else None
+    time_value = (
+        {}
+        if civil is not None and "time" not in civil
+        else _mapping(civil.get("time")) if civil is not None else None
+    )
     if date_value is None or time_value is None:
         return None
     year, month, day = (date_value.get(part) for part in ("year", "month", "day"))

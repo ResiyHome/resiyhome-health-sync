@@ -592,8 +592,8 @@ async def test_daily_rollup_posts_the_civil_range_and_paginates(client, aioclien
     end = datetime(2042, 7, 14, tzinfo=UTC)
     expected_body = {
         "range": {
-            "start": {"year": 2042, "month": 7, "day": 13},
-            "end": {"year": 2042, "month": 7, "day": 14},
+            "start": {"date": {"year": 2042, "month": 7, "day": 13}},
+            "end": {"date": {"year": 2042, "month": 7, "day": 14}},
         },
         "windowSizeDays": 1,
         "pageSize": 10000,

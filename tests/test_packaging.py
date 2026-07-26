@@ -126,14 +126,14 @@ def test_readme_documents_only_required_read_only_scopes() -> None:
     assert "Energy dashboard remains outside this integration" in readme
 
 
-def test_readme_uses_the_v1_public_release_identity() -> None:
+def test_readme_uses_the_current_public_release_identity() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     assert readme.startswith("![Health Sync by ResiyHome](assets/health-sync-by-resiyhome.png)\n\n")
     assert readme.index("assets/health-sync-by-resiyhome.png") < readme.index(
         "# Health Sync by ResiyHome"
     )
-    assert "Release 1.0.1" in readme
+    assert "Release 1.0.2" in readme
     assert "0.3.0" not in readme
 
 
@@ -399,14 +399,14 @@ def test_readme_documents_exactly_one_post_download_restart() -> None:
     )
 
 
-def test_manifest_versions_expanded_metrics_release() -> None:
+def test_manifest_versions_daily_rollup_fix_release() -> None:
     manifest = json.loads(
         (ROOT / "custom_components" / "resiyhome_health_sync" / "manifest.json").read_text(
             encoding="utf-8"
         )
     )
 
-    assert manifest["version"] == "1.0.1"
+    assert manifest["version"] == "1.0.2"
 
 
 def test_gitignore_blocks_credential_artifacts() -> None:

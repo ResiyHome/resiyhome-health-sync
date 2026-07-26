@@ -545,6 +545,12 @@ def _validate_daily_rollup_range(data_type: str, start: datetime, end: datetime)
         raise ValueError(f"daily rollup range cannot exceed {maximum_days} days")
 
 
-def _civil_date(value: datetime) -> dict[str, int]:
-    """Render a timezone-aware civil day in Google's structured date form."""
-    return {"year": value.year, "month": value.month, "day": value.day}
+def _civil_date(value: datetime) -> dict[str, dict[str, int]]:
+    """Render a civil midnight using Google's CivilDateTime wire shape."""
+    return {
+        "date": {
+            "year": value.year,
+            "month": value.month,
+            "day": value.day,
+        }
+    }
