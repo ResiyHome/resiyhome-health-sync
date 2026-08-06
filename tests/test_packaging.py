@@ -318,11 +318,11 @@ def test_changelog_documents_bounded_backfill_fix() -> None:
     assert "restart Home Assistant once" in release
 
 
-def test_changelog_documents_optional_health_capabilities_as_unreleased() -> None:
+def test_changelog_documents_optional_health_capabilities_beta_release() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
 
-    assert changelog.index("## Unreleased") < changelog.index("## 1.0.4")
-    unreleased = changelog.split("## Unreleased", maxsplit=1)[1].split(
+    assert changelog.index("## 1.1.0-beta.1") < changelog.index("## 1.0.4")
+    beta_release = changelog.split("## 1.1.0-beta.1", maxsplit=1)[1].split(
         "## 1.0.4", maxsplit=1
     )[0]
     for phrase in (
@@ -335,7 +335,7 @@ def test_changelog_documents_optional_health_capabilities_as_unreleased() -> Non
         "existing config entries",
         "per person",
     ):
-        assert phrase in unreleased
+        assert phrase in beta_release
 
 
 def test_fixture_provenance_is_documented() -> None:
@@ -434,14 +434,14 @@ def test_readme_documents_exactly_one_post_download_restart() -> None:
     )
 
 
-def test_manifest_versions_current_day_interval_fallback_release() -> None:
+def test_manifest_versions_official_integration_parity_beta_release() -> None:
     manifest = json.loads(
         (ROOT / "custom_components" / "resiyhome_health_sync" / "manifest.json").read_text(
             encoding="utf-8"
         )
     )
 
-    assert manifest["version"] == "1.0.4"
+    assert manifest["version"] == "1.1.0-beta.1"
 
 
 def test_gitignore_blocks_credential_artifacts() -> None:

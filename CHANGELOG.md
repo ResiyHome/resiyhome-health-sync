@@ -2,7 +2,7 @@
 
 All notable public changes to Health Sync by ResiyHome are recorded here.
 
-## Unreleased
+## 1.1.0-beta.1 - 2026-08-06
 
 ### Added
 
