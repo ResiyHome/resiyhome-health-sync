@@ -77,7 +77,101 @@ def normalize_expanded_day(
         heart_zone_thresholds=_heart_zone_thresholds(direct, day),
         heart_zone_calories=_heart_zone_calories(rollups, day),
         weight_kg=_weight(direct, day) if include_weight else None,
+        body_fat_percentage=_body_fat(direct, day) if include_weight else None,
+        height_m=_height(direct, day) if include_weight else None,
     )
+
+
+def normalize_nutrition_energy(
+    points: Sequence[DataPoint], day: date
+) -> float | None:
+    """Sum allowlisted nutrition energy for one local calendar day."""
+    return _sum_current_day_session_values(
+        points,
+        day,
+        payload_key="nutritionLog",
+        value_path=("energy", "kcal"),
+    )
+
+
+def normalize_hydration_ml(
+    points: Sequence[DataPoint], day: date
+) -> float | None:
+    """Sum allowlisted hydration volume for one local calendar day."""
+    return _sum_current_day_session_values(
+        points,
+        day,
+        payload_key="hydrationLog",
+        value_path=("amountConsumed", "milliliters"),
+    )
+
+
+def _sum_current_day_session_values(
+    points: Sequence[DataPoint],
+    day: date,
+    *,
+    payload_key: str,
+    value_path: tuple[str, ...],
+) -> float | None:
+    """Sum one allowlisted value path without retaining source log records."""
+    total = 0.0
+    found = False
+    for point in _sequence(points) or ():
+        mapped = _mapping(point)
+        payload = _mapping(mapped.get(payload_key)) if mapped is not None else None
+        if payload is None:
+            return None
+        interval_day = _session_interval_start_day(payload.get("interval"))
+        if interval_day is None:
+            return None
+        if interval_day != day:
+            continue
+
+        value: object = payload
+        for path_part in value_path:
+            value_mapping = _mapping(value)
+            if value_mapping is None or path_part not in value_mapping:
+                return None
+            value = value_mapping[path_part]
+        normalized = _non_negative_float(value)
+        if normalized is None:
+            return None
+        found = True
+        total += normalized
+        if not isfinite(total):
+            return None
+    return total if found else None
+
+
+def _session_interval_start_day(value: object) -> date | None:
+    """Validate a session interval and return its offset-derived local start day."""
+    interval = _mapping(value)
+    if interval is None:
+        return None
+    start = _sample_timestamp(
+        {
+            "physicalTime": interval.get("startTime"),
+            "utcOffset": interval.get("startUtcOffset"),
+        }
+    )
+    end = _sample_timestamp(
+        {
+            "physicalTime": interval.get("endTime"),
+            "utcOffset": interval.get("endUtcOffset"),
+        }
+    )
+    if start is None or end is None or start[0] >= end[0]:
+        return None
+    for civil_key, boundary in (
+        ("civilStartTime", start),
+        ("civilEndTime", end),
+    ):
+        if civil_key not in interval:
+            continue
+        civil = _civil_date_time(interval.get(civil_key))
+        if civil is None or civil[0].date() != boundary[1]:
+            return None
+    return start[1]
 
 
 def _active_zone_minutes(
@@ -410,12 +504,86 @@ def _duration_minutes(value: object) -> float | None:
 
 def _weight(stream: DataPointStreams, day: date) -> float | None:
     """Convert one complete direct weight sample from grams to kilograms."""
-    payload = _single_sample_payload(stream, "weight", "weight", day)
-    grams = _non_negative_float(payload.get("weightGrams")) if payload is not None else None
+    return _latest_sample_value(
+        stream,
+        "weight",
+        "weight",
+        "weightGrams",
+        day,
+        _weight_kilograms,
+    )
+
+
+def _weight_kilograms(value: object) -> float | None:
+    grams = _non_negative_float(value)
     if grams is None:
         return None
     kilograms = grams / 1000
     return kilograms if isfinite(kilograms) else None
+
+
+def _body_fat(stream: DataPointStreams, day: date) -> float | None:
+    """Read one complete body-fat sample in the documented percentage range."""
+    return _latest_sample_value(
+        stream,
+        "body-fat",
+        "bodyFat",
+        "percentage",
+        day,
+        _percentage,
+    )
+
+
+def _height(stream: DataPointStreams, day: date) -> float | None:
+    """Convert one complete positive height sample from millimeters to meters."""
+    return _latest_sample_value(
+        stream,
+        "height",
+        "height",
+        "heightMillimeters",
+        day,
+        _height_meters,
+    )
+
+
+def _height_meters(value: object) -> float | None:
+    millimeters = _non_negative_float(value)
+    if millimeters is None or millimeters == 0:
+        return None
+    meters = millimeters / 1000.0
+    return meters if isfinite(meters) else None
+
+
+def _latest_sample_value(
+    stream: DataPointStreams,
+    data_type: str,
+    payload_key: str,
+    value_key: str,
+    day: date,
+    parser: Callable[[object], float | None],
+) -> float | None:
+    """Return the latest timestamped valid value for one requested local day."""
+    points = _sequence(stream.get(data_type))
+    if not points:
+        return None
+    latest: tuple[datetime, float] | None = None
+    for point in points:
+        mapped = _mapping(point)
+        payload = _mapping(mapped.get(payload_key)) if mapped is not None else None
+        sample_time = (
+            _sample_timestamp(payload.get("sampleTime"))
+            if payload is not None
+            else None
+        )
+        if payload is None or sample_time is None:
+            continue
+        timestamp, local_date = sample_time
+        value = parser(payload.get(value_key))
+        if local_date != day or value is None:
+            continue
+        if latest is None or timestamp > latest[0]:
+            latest = timestamp, value
+    return latest[1] if latest is not None else None
 
 
 def _single_daily_payload(

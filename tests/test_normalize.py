@@ -149,6 +149,14 @@ def _daily_date() -> dict[str, int]:
     return {"year": 2042, "month": 7, "day": 13}
 
 
+def _daily_rollup(payload_key: str, **values: object) -> dict[str, object]:
+    return {
+        "civilStartTime": {"date": _daily_date()},
+        "civilEndTime": {"date": {"year": 2042, "month": 7, "day": 14}},
+        payload_key: values,
+    }
+
+
 def _distance_point(millimeters: object) -> dict[str, Any]:
     return {"distance": {"interval": _observation_interval(), "millimeters": millimeters}}
 
@@ -475,6 +483,196 @@ def test_normalizes_google_v4_units_and_sleep_crossing_midnight(
     assert result.workouts[0].active_energy_kcal == 111.0
     assert result.workouts[0].start == datetime.fromisoformat("2042-07-13T14:00:00+00:00")
     assert result.workouts[0].end == datetime.fromisoformat("2042-07-13T14:30:00+00:00")
+
+
+@pytest.mark.parametrize(("kcal_sum", "expected"), [(0.0, 0.0), (2345.6, 2345.6)])
+def test_total_calories_daily_rollup_preserves_zero_and_positive_values(
+    kcal_sum: float, expected: float
+) -> None:
+    """A valid total-calorie aggregate remains finite, non-negative, and exact."""
+    result = normalize_day(
+        date(2042, 7, 13),
+        {},
+        {"total-calories": [_daily_rollup("totalCalories", kcalSum=kcal_sum)]},
+        {},
+    )
+
+    assert result.total_energy_kcal == expected
+
+
+@pytest.mark.parametrize("kcal_sum", [math.nan, math.inf, -1.0, "2345.6", True, None, []])
+def test_total_calories_rejects_non_finite_negative_and_malformed_values(
+    kcal_sum: object,
+) -> None:
+    """Invalid total-calorie aggregates never become a value or a false zero."""
+    result = normalize_day(
+        date(2042, 7, 13),
+        {},
+        {"total-calories": [_daily_rollup("totalCalories", kcalSum=kcal_sum)]},
+        {},
+    )
+
+    assert result.total_energy_kcal is None
+
+
+@pytest.mark.parametrize(
+    ("boundary", "value"),
+    [
+        ("civilStartTime", MISSING),
+        ("civilEndTime", MISSING),
+        ("civilStartTime", {"date": {"year": 2042, "month": "7", "day": 13}}),
+        ("civilEndTime", {"date": []}),
+        ("civilStartTime", {"date": {"year": 2042, "month": 7, "day": 12}}),
+        ("civilEndTime", {"date": {"year": 2042, "month": 7, "day": 15}}),
+        (
+            "civilStartTime",
+            {
+                "date": {"year": 2042, "month": 7, "day": 13},
+                "time": {"hours": 0, "minutes": 1},
+            },
+        ),
+        (
+            "civilEndTime",
+            {
+                "date": {"year": 2042, "month": 7, "day": 14},
+                "time": {"hours": 0, "seconds": 1},
+            },
+        ),
+        (
+            "civilEndTime",
+            {
+                "date": {"year": 2042, "month": 7, "day": 13},
+                "time": {"hours": 23, "minutes": 59, "seconds": 59},
+            },
+        ),
+    ],
+    ids=[
+        "missing-start",
+        "missing-end",
+        "malformed-start",
+        "malformed-end",
+        "mismatched-start",
+        "mismatched-end",
+        "non-midnight-start",
+        "non-midnight-end",
+        "same-day-last-second-end",
+    ],
+)
+def test_total_calories_rejects_incomplete_or_wrong_civil_window(
+    boundary: str, value: object
+) -> None:
+    """A calorie aggregate is valid only for its complete requested-day window."""
+    point = _daily_rollup("totalCalories", kcalSum=2345.6)
+    if value is MISSING:
+        point.pop(boundary)
+    else:
+        point[boundary] = value
+
+    result = normalize_day(
+        date(2042, 7, 13),
+        {},
+        {"total-calories": [point]},
+        {},
+    )
+
+    assert result.total_energy_kcal is None
+
+
+def test_sleep_period_onset_and_after_wake_use_latest_valid_session() -> None:
+    """Detailed timing follows the same latest valid completed sleep as duration."""
+    older = _sleep_point(
+        start="2042-07-12T20:00:00Z",
+        end="2042-07-13T03:00:00Z",
+        minutes_asleep="360",
+    )
+    latest = _sleep_point(
+        start="2042-07-13T04:00:00Z",
+        end="2042-07-13T11:00:00Z",
+        minutes_asleep="375",
+        stages=[],
+    )
+    latest["sleep"]["summary"].update(
+        {
+            "minutesInSleepPeriod": "402",
+            "minutesToFallAsleep": "6",
+            "minutesAfterWakeUp": "12",
+        }
+    )
+    invalid_newer = _sleep_point(
+        start="2042-07-13T11:00:00Z",
+        end="2042-07-13T12:00:00Z",
+        minutes_asleep="61",
+    )
+
+    result = normalize_day(
+        date(2042, 7, 13),
+        {},
+        {"sleep": [older, invalid_newer, latest]},
+        {},
+    )
+
+    assert result.sleep_minutes == 375.0
+    assert result.sleep_period_minutes == 402.0
+    assert result.sleep_onset_minutes == 6.0
+    assert result.sleep_after_wake_minutes == 12.0
+
+
+def test_sleep_onset_and_after_wake_preserve_true_zero() -> None:
+    """Documented zero-minute sleep timing remains available as zero."""
+    point = _sleep_point()
+    point["sleep"]["summary"].update(
+        {
+            "minutesInSleepPeriod": "420",
+            "minutesToFallAsleep": "0",
+            "minutesAfterWakeUp": "0",
+        }
+    )
+
+    result = normalize_day(date(2042, 7, 13), {}, {"sleep": [point]}, {})
+
+    assert result.sleep_period_minutes == 420.0
+    assert result.sleep_onset_minutes == 0.0
+    assert result.sleep_after_wake_minutes == 0.0
+
+
+@pytest.mark.parametrize(
+    ("field", "attribute", "value"),
+    [
+        ("minutesInSleepPeriod", "sleep_period_minutes", math.nan),
+        ("minutesInSleepPeriod", "sleep_period_minutes", math.inf),
+        ("minutesInSleepPeriod", "sleep_period_minutes", "-1"),
+        ("minutesInSleepPeriod", "sleep_period_minutes", "malformed"),
+        ("minutesInSleepPeriod", "sleep_period_minutes", "451"),
+        ("minutesToFallAsleep", "sleep_onset_minutes", math.nan),
+        ("minutesToFallAsleep", "sleep_onset_minutes", math.inf),
+        ("minutesToFallAsleep", "sleep_onset_minutes", "-1"),
+        ("minutesToFallAsleep", "sleep_onset_minutes", "malformed"),
+        ("minutesToFallAsleep", "sleep_onset_minutes", "451"),
+        ("minutesAfterWakeUp", "sleep_after_wake_minutes", math.nan),
+        ("minutesAfterWakeUp", "sleep_after_wake_minutes", math.inf),
+        ("minutesAfterWakeUp", "sleep_after_wake_minutes", "-1"),
+        ("minutesAfterWakeUp", "sleep_after_wake_minutes", "malformed"),
+        ("minutesAfterWakeUp", "sleep_after_wake_minutes", "451"),
+    ],
+)
+def test_sleep_period_onset_and_after_wake_reject_invalid_values(
+    field: str, attribute: str, value: object
+) -> None:
+    """Each optional timing value fails closed without discarding valid sleep."""
+    point = _sleep_point()
+    point["sleep"]["summary"].update(
+        {
+            "minutesInSleepPeriod": "420",
+            "minutesToFallAsleep": "6",
+            "minutesAfterWakeUp": "12",
+            field: value,
+        }
+    )
+
+    result = normalize_day(date(2042, 7, 13), {}, {"sleep": [point]}, {})
+
+    assert result.sleep_minutes == 390.0
+    assert getattr(result, attribute) is None
 
 
 def test_normalizes_google_sleep_summary_payload_without_nested_summary() -> None:

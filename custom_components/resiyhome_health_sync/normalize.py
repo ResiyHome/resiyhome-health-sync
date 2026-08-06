@@ -2,7 +2,8 @@
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
 from math import isfinite
 from typing import cast
 
@@ -10,6 +11,18 @@ from .models import DailySummary, SourceKind, WorkoutSummary
 
 type DataPoint = Mapping[str, object]
 type DataPointStreams = Mapping[str, Sequence[DataPoint]]
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedSleep:
+    """Validated values from one completed sleep session."""
+
+    minutes_asleep: float | None
+    stages: Mapping[str, float]
+    period_minutes: float | None
+    onset_minutes: float | None
+    after_wake_minutes: float | None
+
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
@@ -55,13 +68,14 @@ def normalize_day(
     active_energy_kcal = _sum_float_metric(
         all_sources, "active-energy-burned", "activeEnergyBurned", "kcal"
     )
+    total_energy_kcal = _total_energy(all_sources, day)
     exercise_minutes = _active_minutes(all_sources)
     resting_heart_rate = _latest_integer_metric(
         all_sources, "daily-resting-heart-rate", "dailyRestingHeartRate", "beatsPerMinute"
     )
     heart_rate = _heart_rate_statistics(all_sources)
     hrv_ms = _hrv(all_sources)
-    sleep_minutes, sleep_stages = _sleep(all_sources)
+    sleep = _sleep(all_sources)
     workouts = _workouts(all_sources)
 
     has_fitbit, has_healthkit = _platforms(raw)
@@ -71,8 +85,9 @@ def normalize_day(
             steps,
             distance_m,
             active_energy_kcal,
+            total_energy_kcal,
             exercise_minutes,
-            sleep_minutes,
+            sleep.minutes_asleep,
             resting_heart_rate,
             heart_rate[0],
             hrv_ms,
@@ -91,9 +106,13 @@ def normalize_day(
         fitbit_steps=fitbit_steps,
         distance_m=distance_m,
         active_energy_kcal=active_energy_kcal,
+        total_energy_kcal=total_energy_kcal,
         exercise_minutes=exercise_minutes,
-        sleep_minutes=sleep_minutes,
-        sleep_stages=sleep_stages,
+        sleep_minutes=sleep.minutes_asleep,
+        sleep_stages=sleep.stages,
+        sleep_period_minutes=sleep.period_minutes,
+        sleep_onset_minutes=sleep.onset_minutes,
+        sleep_after_wake_minutes=sleep.after_wake_minutes,
         resting_heart_rate=_as_float(resting_heart_rate),
         average_heart_rate=heart_rate[0],
         minimum_heart_rate=heart_rate[1],
@@ -302,28 +321,94 @@ def _latest_float_metric(
     return values[0]
 
 
-def _sleep(stream: DataPointStreams) -> tuple[float | None, Mapping[str, float]]:
+def _total_energy(stream: DataPointStreams, day: date) -> float | None:
+    """Read one complete daily total-calorie rollup without losing true zero."""
+    points = _metric_points(stream, "total-calories")
+    if points is None or len(points) != 1:
+        return None
+    point = points[0]
+    if not _rollup_window_matches_day(point, day):
+        return None
+    payload = _mapping(point.get("totalCalories"))
+    if payload is None:
+        return None
+    return _non_negative_float(payload.get("kcalSum"))
+
+
+def _rollup_window_matches_day(point: Mapping[str, object], day: date) -> bool:
+    """Validate the documented daily civil window before trusting its aggregate."""
+    start = _civil_date_time(point.get("civilStartTime"))
+    end = _civil_date_time(point.get("civilEndTime"))
+    start_of_day = datetime(day.year, day.month, day.day)
+    return start == (start_of_day, 0) and end == (
+        start_of_day + timedelta(days=1),
+        0,
+    )
+
+
+def _civil_date_time(value: object) -> tuple[datetime, int] | None:
+    """Parse a complete documented civil timestamp."""
+    civil = _mapping(value)
+    date_value = _mapping(civil.get("date")) if civil is not None else None
+    time_value = (
+        {}
+        if civil is not None and "time" not in civil
+        else _mapping(civil.get("time")) if civil is not None else None
+    )
+    if date_value is None or time_value is None:
+        return None
+    year, month, day = (date_value.get(part) for part in ("year", "month", "day"))
+    hour = time_value.get("hours", 0)
+    minute = time_value.get("minutes", 0)
+    second = time_value.get("seconds", 0)
+    nanos = time_value.get("nanos", 0)
+    if not all(
+        type(part) is int for part in (year, month, day, hour, minute, second, nanos)
+    ):
+        return None
+    year_int = cast(int, year)
+    month_int = cast(int, month)
+    day_int = cast(int, day)
+    hour_int = cast(int, hour)
+    minute_int = cast(int, minute)
+    second_int = cast(int, second)
+    nanos_int = cast(int, nanos)
+    if (
+        not 0 <= hour_int <= 23
+        or not 0 <= minute_int <= 59
+        or not 0 <= second_int <= 59
+        or not 0 <= nanos_int <= 999_999_999
+    ):
+        return None
+    try:
+        parsed = datetime(year_int, month_int, day_int, hour_int, minute_int, second_int)
+    except ValueError:
+        return None
+    return parsed, nanos_int
+
+
+def _sleep(stream: DataPointStreams) -> NormalizedSleep:
     """Use the latest valid reconciled sleep session, including midnight crossings."""
     points = _metric_points(stream, "sleep")
     if not points:
-        return None, {}
+        return NormalizedSleep(None, {}, None, None, None)
 
-    sessions: list[tuple[datetime, float, Mapping[str, float]]] = []
+    sessions: list[tuple[datetime, NormalizedSleep]] = []
     for point in points:
         payload = _mapping(point.get("sleep"))
         session = _sleep_session(payload)
-        if session is not None:
-            sessions.append(session)
+        interval = _physical_interval(payload.get("interval")) if payload is not None else None
+        if session is not None and interval is not None:
+            sessions.append((interval[1], session))
     if not sessions:
-        return None, {}
+        return NormalizedSleep(None, {}, None, None, None)
 
-    _, minutes, stages = max(sessions, key=lambda session: session[0])
-    return minutes, stages
+    return max(sessions, key=lambda session: session[0])[1]
 
 
 def _sleep_session(
     payload: Mapping[str, object] | None,
-) -> tuple[datetime, float, Mapping[str, float]] | None:
+) -> NormalizedSleep | None:
     """Validate a complete sleep session without keeping its source payload."""
     if payload is None:
         return None
@@ -339,16 +424,35 @@ def _sleep_session(
     if minutes_float is None or minutes_float * 60 > interval_seconds:
         return None
 
+    period_minutes = _sleep_timing_minutes(
+        summary.get("minutesInSleepPeriod"), interval_seconds
+    )
+    onset_minutes = _sleep_timing_minutes(
+        summary.get("minutesToFallAsleep"), interval_seconds
+    )
+    after_wake_minutes = _sleep_timing_minutes(
+        summary.get("minutesAfterWakeUp"), interval_seconds
+    )
+
+    def normalized(stages: Mapping[str, float]) -> NormalizedSleep:
+        return NormalizedSleep(
+            minutes_asleep=minutes_float,
+            stages=stages,
+            period_minutes=period_minutes,
+            onset_minutes=onset_minutes,
+            after_wake_minutes=after_wake_minutes,
+        )
+
     fallback_stages = _sleep_summary_fallback_stages(summary, interval_seconds)
     stages_value = summary.get("stagesSummary") if summary is not None else None
     if stages_value is None:
-        return end, minutes_float, fallback_stages
+        return normalized(fallback_stages)
     if not isinstance(stages_value, list):
         if nested_summary is not None and not fallback_stages:
             return None
-        return end, minutes_float, fallback_stages
+        return normalized(fallback_stages)
     if not stages_value and fallback_stages:
-        return end, minutes_float, fallback_stages
+        return normalized(fallback_stages)
 
     stages: dict[str, float] = {}
     for stage_value in stages_value:
@@ -359,22 +463,31 @@ def _sleep_session(
             continue
         if stage_minutes is None:
             if fallback_stages:
-                return end, minutes_float, fallback_stages
+                return normalized(fallback_stages)
             return None
         if _sleep_stage_is_summary_total(stage):
             stages[normalized_type] = max(stages.get(normalized_type, 0.0), stage_minutes)
         else:
             stages[normalized_type] = stages.get(normalized_type, 0.0) + stage_minutes
     if not stages:
-        return end, minutes_float, fallback_stages
+        return normalized(fallback_stages)
     stage_total_seconds = sum(stages.values()) * 60
     if stage_total_seconds > interval_seconds:
         if fallback_stages:
-            return end, minutes_float, fallback_stages
+            return normalized(fallback_stages)
         return None
     for stage_type, stage_minutes in fallback_stages.items():
         stages.setdefault(stage_type, stage_minutes)
-    return end, minutes_float, stages
+    return normalized(stages)
+
+
+def _sleep_timing_minutes(value: object, interval_seconds: float) -> float | None:
+    """Validate one optional whole-minute timing against its session interval."""
+    minutes = _non_negative_integer(value)
+    normalized = _finite_float(minutes) if minutes is not None else None
+    if normalized is None or normalized * 60 > interval_seconds:
+        return None
+    return normalized
 
 
 def _sleep_stage_type(value: object) -> str | None:

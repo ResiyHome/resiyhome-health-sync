@@ -12,7 +12,11 @@ from pathlib import Path
 
 import pytest
 
-from custom_components.resiyhome_health_sync.const import SCOPES
+from custom_components.resiyhome_health_sync.const import (
+    NUTRITION_SCOPE,
+    SCOPES,
+    SETTINGS_SCOPE,
+)
 from scripts.verify_public_release import scan_text
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -116,24 +120,27 @@ def test_hacs_metadata_marks_custom_integration() -> None:
     }
 
 
-def test_readme_documents_only_required_read_only_scopes() -> None:
+def test_readme_documents_baseline_and_optional_read_only_scopes() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
-    for scope in SCOPES:
+    for scope in (*SCOPES, NUTRITION_SCOPE, SETTINGS_SCOPE):
         assert scope in readme
+    assert "three baseline read-only scopes" in readme
+    assert "two optional read-only scopes" in readme
     assert "write" not in readme.lower()
     assert "writeonly" not in readme.lower()
     assert "Energy dashboard remains outside this integration" in readme
 
 
-def test_readme_uses_the_current_public_release_identity() -> None:
+def test_readme_uses_public_identity_without_stale_release_claims() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     assert readme.startswith("![Health Sync by ResiyHome](assets/health-sync-by-resiyhome.png)\n\n")
     assert readme.index("assets/health-sync-by-resiyhome.png") < readme.index(
         "# Health Sync by ResiyHome"
     )
-    assert "Release 1.0.3" in readme
+    assert "Release 1.0.3" not in readme
+    assert "Release 1.0.4" not in readme
     assert "0.3.0" not in readme
 
 
@@ -157,9 +164,15 @@ def test_readme_documents_expanded_metrics_release_contract() -> None:
         "calories for light, moderate, vigorous, and peak heart-rate zones",
         "sleep respiratory rate for deep, light, and REM sleep",
         "Weight",
+        "Body-fat percentage",
+        "Height",
         "include_body_measurements",
+        "include_nutrition",
+        "include_paired_devices",
         "90-day normalized backfill",
         "reconciled daily summaries and daily rollups",
+        "Nutrition has no historical backfill in this release.",
+        "Paired-device last sync",
         "unavailable",
         "valid zero",
         "raw API payloads",
@@ -175,8 +188,10 @@ def test_readme_documents_reconciliation_and_exact_poll_request_counts() -> None
     for documented_text in (
         "Google-reconciled all-source stream",
         "fully successful, non-paginated refresh",
-        "35 logical data requests",
-        "36 when body measurements are enabled",
+        "36 logical data requests",
+        "39 when body measurements are enabled",
+        "Nutrition adds two",
+        "Paired devices add one",
         "one-time authentication retry",
         "Pagination can increase the actual HTTP request count",
         "Authentication failure stops the remaining poll immediately",
@@ -301,6 +316,26 @@ def test_changelog_documents_bounded_backfill_fix() -> None:
     assert "seven-day windows" in release
     assert "pagination safety limits" in release
     assert "restart Home Assistant once" in release
+
+
+def test_changelog_documents_optional_health_capabilities_as_unreleased() -> None:
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert changelog.index("## Unreleased") < changelog.index("## 1.0.4")
+    unreleased = changelog.split("## Unreleased", maxsplit=1)[1].split(
+        "## 1.0.4", maxsplit=1
+    )[0]
+    for phrase in (
+        "include_nutrition",
+        "include_paired_devices",
+        "Total calories burned today",
+        "Body-fat percentage",
+        "Paired-device last sync",
+        "no historical nutrition backfill",
+        "existing config entries",
+        "per person",
+    ):
+        assert phrase in unreleased
 
 
 def test_fixture_provenance_is_documented() -> None:

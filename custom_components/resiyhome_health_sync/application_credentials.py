@@ -6,7 +6,7 @@ from homeassistant.components.application_credentials import ClientCredential
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_entry_oauth2_flow
 
-from .const import DOMAIN, SCOPES, TOKEN_URL
+from .const import BASE_SCOPES, DOMAIN, TOKEN_URL
 
 AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_CLOUD_CREDENTIALS_URL = "https://console.cloud.google.com/apis/credentials"
@@ -14,7 +14,7 @@ GOOGLE_CLOUD_CONSENT_URL = "https://console.cloud.google.com/apis/credentials/co
 
 
 class HealthSyncOAuth2Implementation(config_entry_oauth2_flow.LocalOAuth2Implementation):
-    """Google OAuth implementation with the exact read-only Health scopes."""
+    """Google OAuth implementation with the baseline read-only Health scopes."""
 
     def __init__(
         self,
@@ -43,7 +43,7 @@ class HealthSyncOAuth2Implementation(config_entry_oauth2_flow.LocalOAuth2Impleme
     def extra_authorize_data(self) -> dict[str, str]:
         """Request durable, explicitly scoped Google Health access."""
         return {
-            "scope": " ".join(SCOPES),
+            "scope": " ".join(BASE_SCOPES),
             "access_type": "offline",
             "prompt": "consent",
             "include_granted_scopes": "false",

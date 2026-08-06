@@ -18,7 +18,14 @@ from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import AuthenticationError, GoogleHealthClient, OAuthTokenState, UpdateFailed
-from .const import DOMAIN, SCAN_INTERVAL, SCOPES
+from .capabilities import ScopeGrant, validate_granted_scopes
+from .const import (
+    BASE_SCOPES,
+    DOMAIN,
+    NUTRITION_SCOPE,
+    SCAN_INTERVAL,
+    SETTINGS_SCOPE,
+)
 from .coordinator import HealthSyncCoordinator
 from .storage import HealthHistoryStore, HistoryStoreError
 from .websocket import async_register_websocket, async_unregister_websocket
@@ -39,6 +46,7 @@ class HealthSyncRuntimeData:
     client: GoogleHealthClient
     history: HealthHistoryStore
     coordinator: HealthSyncCoordinator
+    scope_grant: ScopeGrant
     backfill_task: asyncio.Task[None] | None = None
 
 
@@ -47,7 +55,8 @@ type HealthSyncConfigEntry = ConfigEntry[HealthSyncRuntimeData]
 
 async def async_setup_entry(hass: HomeAssistant, entry: HealthSyncConfigEntry) -> bool:
     """Set up one independently authorized Health Sync person."""
-    token_state = _token_state_from_entry(entry)
+    token_state, scope_grant = _token_state_from_entry(entry)
+    runtime: HealthSyncRuntimeData | None = None
 
     async def async_update_token_state(state: OAuthTokenState) -> None:
         refresh_token = state.refresh_token or str(entry.data["refresh_token"])
@@ -58,9 +67,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HealthSyncConfigEntry) -
                 "access_token": state.access_token,
                 "refresh_token": refresh_token,
                 "expires_at": state.expires_at.isoformat(),
-                "scopes": list(SCOPES),
+                "scopes": [
+                    scope
+                    for scope in (*BASE_SCOPES, NUTRITION_SCOPE, SETTINGS_SCOPE)
+                    if scope in state.scopes
+                ],
             },
         )
+        if runtime is not None:
+            runtime.scope_grant = validate_granted_scopes(state.scopes, entry.options)
 
     client_id, client_secret, redirect_uri = await _async_get_oauth_client_config(hass, entry)
     client = GoogleHealthClient(
@@ -69,31 +84,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: HealthSyncConfigEntry) -
         client_secret=client_secret,
         redirect_uri=redirect_uri,
         token_state=token_state,
+        scope_grant=scope_grant,
         token_update_callback=async_update_token_state,
     )
     history = HealthHistoryStore(hass, entry.entry_id)
-    coordinator = HealthSyncCoordinator(
-        hass,
-        client,
-        history,
-        include_body_measurements=bool(entry.options.get("include_body_measurements", False)),
-    )
-    runtime = HealthSyncRuntimeData(client, history, coordinator)
-
+    backfill_coro = None
+    setup_complete = False
     try:
-        await history.async_load()
-        snapshot = await coordinator.async_refresh_current()
-    except AuthenticationError:
-        raise ConfigEntryAuthFailed("Google Health authorization must be renewed") from None
-    except UpdateFailed:
-        raise ConfigEntryNotReady("Google Health is temporarily unavailable") from None
-    except HistoryStoreError:
-        raise ConfigEntryError("Health Sync history requires repair") from None
+        coordinator = HealthSyncCoordinator(
+            hass,
+            client,
+            history,
+            include_body_measurements=bool(
+                entry.options.get("include_body_measurements", False)
+            ),
+        )
+        runtime = HealthSyncRuntimeData(client, history, coordinator, scope_grant)
 
-    coordinator.async_set_updated_data(snapshot)
-    entry.runtime_data = runtime
-    backfill_coro = _async_run_backfill(entry)
-    try:
+        try:
+            await history.async_load()
+            snapshot = await coordinator.async_refresh_current()
+        except AuthenticationError:
+            raise ConfigEntryAuthFailed(
+                "Google Health authorization must be renewed"
+            ) from None
+        except UpdateFailed:
+            raise ConfigEntryNotReady(
+                "Google Health is temporarily unavailable"
+            ) from None
+        except HistoryStoreError:
+            raise ConfigEntryError("Health Sync history requires repair") from None
+
+        coordinator.async_set_updated_data(snapshot)
+        entry.runtime_data = runtime
+        backfill_coro = _async_run_backfill(entry)
         await hass.config_entries.async_forward_entry_setups(entry, _PLATFORMS)
         runtime.backfill_task = entry.async_create_background_task(
             hass,
@@ -101,17 +125,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HealthSyncConfigEntry) -
             f"Health Sync backfill {entry.entry_id}",
         )
         _async_register_interfaces(hass)
-    except BaseException:
-        if runtime.backfill_task is not None:
-            runtime.backfill_task.cancel()
-            await asyncio.gather(runtime.backfill_task, return_exceptions=True)
-            runtime.backfill_task = None
-        else:
-            backfill_coro.close()
-        if getattr(entry, "runtime_data", None) is runtime:
-            object.__delattr__(entry, "runtime_data")
-        raise
-    return True
+        setup_complete = True
+        return True
+    finally:
+        if not setup_complete:
+            if runtime is not None and runtime.backfill_task is not None:
+                runtime.backfill_task.cancel()
+                await asyncio.gather(runtime.backfill_task, return_exceptions=True)
+                runtime.backfill_task = None
+            elif backfill_coro is not None:
+                backfill_coro.close()
+            await history.async_shutdown()
+            if runtime is not None and getattr(entry, "runtime_data", None) is runtime:
+                object.__delattr__(entry, "runtime_data")
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: HealthSyncConfigEntry) -> bool:
@@ -125,6 +151,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: HealthSyncConfigEntry) 
         with suppress(asyncio.CancelledError):
             await task
         entry.runtime_data.backfill_task = None
+    await entry.runtime_data.history.async_shutdown()
     _async_unregister_interfaces_if_last_entry(hass)
     return True
 
@@ -219,7 +246,9 @@ async def _async_run_backfill(entry: HealthSyncConfigEntry) -> None:
             return
 
 
-def _token_state_from_entry(entry: HealthSyncConfigEntry) -> OAuthTokenState:
+def _token_state_from_entry(
+    entry: HealthSyncConfigEntry,
+) -> tuple[OAuthTokenState, ScopeGrant]:
     """Validate persisted token state without including credential values in errors."""
     try:
         serialized_expiration = entry.data["expires_at"]
@@ -238,18 +267,22 @@ def _token_state_from_entry(entry: HealthSyncConfigEntry) -> OAuthTokenState:
             raise ValueError
 
         expires_at = datetime.fromisoformat(serialized_expiration)
-        scopes = frozenset(serialized_scopes)
+        scope_grant = validate_granted_scopes(serialized_scopes, entry.options)
+        scopes = scope_grant.granted_scopes
         if expires_at.tzinfo is None or expires_at.utcoffset() is None:
             raise ValueError
-        if scopes != frozenset(SCOPES):
+        if not scope_grant.baseline_valid:
             raise ValueError
     except KeyError, TypeError, ValueError:
         raise ConfigEntryAuthFailed("Health Sync authorization must be renewed") from None
-    return OAuthTokenState(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        expires_at=expires_at,
-        scopes=scopes,
+    return (
+        OAuthTokenState(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_at=expires_at,
+            scopes=scopes,
+        ),
+        scope_grant,
     )
 
 

@@ -42,17 +42,33 @@ be revoked. An unverified-app warning and Google user limits can remain for a pr
 unverified project. Publishing status is not a substitute for verification, policy
 compliance, or secure secret handling.
 
-## 4. Add exactly the required scopes
+## 4. Add the approved read-only scopes
 
 Open [Google Auth Platform > Data Access](https://console.cloud.google.com/auth/scopes),
-select **Add or remove scopes**, and add exactly these three scopes:
+select **Add or remove scopes**, and configure these three baseline scopes:
 
 - `https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly`
 - `https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly`
 - `https://www.googleapis.com/auth/googlehealth.sleep.readonly`
 
-Do not add broader permissions. Confirm the current permission descriptions in the
+Also configure these optional scopes if anyone may enable the matching
+per-person capability:
+
+- `https://www.googleapis.com/auth/googlehealth.nutrition.readonly` for
+  `include_nutrition`
+- `https://www.googleapis.com/auth/googlehealth.settings.readonly` for
+  `include_paired_devices`
+
+The initial integration flow requests only the three baseline scopes. Health
+Sync requests an optional scope later only after the matching option is
+enabled. `include_body_measurements` uses the baseline health-measurements
+scope and does not require another permission.
+
+Do not add broader permissions. Confirm the current descriptions and Google's
+partial consent guidance in the
 [official Google Health scope list](https://developers.google.com/health/scopes).
+Health Sync accepts partial consent only when all three baseline scopes remain
+granted; declining an optional scope leaves the baseline entry valid.
 
 ## 5. Create the OAuth client
 
@@ -86,12 +102,47 @@ you suspect exposure, update Application Credentials, and reauthenticate existin
 
 ## 7. Authorize each person
 
-Add the integration once per person. Use a private browser window or explicit
-Google-account switching, verify the active account before consent, and approve all three
-scopes. See [Multi-user setup](multi-user.md).
+Add the integration once per person. Before OAuth, Home Assistant asks for the
+person's display name in **Person name** (`person_name`); Health Sync derives
+the stable person slug rather than presenting a slug field. Use a private
+browser window or explicit Google-account switching, verify the active account
+before consent, and approve all three baseline scopes. See
+[Multi-user setup](multi-user.md).
 
-If Google reports missing scopes, update Data Access first and then use
-**Reauthenticate** on the existing Home Assistant entry. Do not add a duplicate entry.
+For an existing person, enable `include_nutrition`,
+`include_paired_devices`, or both from that person's Health Sync options.
+Home Assistant starts reauthorization when the saved token lacks the newly
+requested optional scope. Complete consent using the same person's Google
+account and the same config entry. Do not delete, re-add, or duplicate the
+entry.
+
+If an optional permission is declined, baseline sensors continue. The
+declined capability remains unavailable until the option is enabled and the
+matching scope is granted in a later reauthorization.
+
+## Current Google Health v4 contracts
+
+Health Sync sends authenticated requests to the current base URL
+`https://health.googleapis.com/v4`. The public implementation follows these
+official references:
+
+- [Google Health data types](https://developers.google.com/health/data-types)
+- [v4 data-point schema](https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints)
+- [v4 reconcile method](https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints/reconcile)
+- [v4 paired-device resource](https://developers.google.com/health/reference/rest/v4/users.pairedDevices)
+- [v4 paired-device list method](https://developers.google.com/health/reference/rest/v4/users.pairedDevices/list)
+
+Current and historical health metrics use the v4 data-point methods. Optional
+nutrition reads `nutrition-log` and `hydration-log` through the reconcile
+method. Optional paired-device discovery uses
+`GET https://health.googleapis.com/v4/{parent=users/*}/pairedDevices`, with an
+empty request body, a maximum documented page size of 100, and
+`googlehealth.settings.readonly`.
+
+The paired-device response contract names are `deviceVersion`,
+`batteryStatus`, `batteryLevel`, and `lastSyncTime`. The last field is the
+Fitbit mobile-application sync timestamp, not Health Sync's Google API refresh
+timestamp.
 
 ## Troubleshooting OAuth
 
@@ -100,8 +151,11 @@ If Google reports missing scopes, update Data Access first and then use
 - **Access blocked or user not allowed:** while in Testing, add that Google account under
   **Audience > Test users**.
 - **Reauthentication every seven days:** the project is likely still in Testing.
-- **Missing scope:** confirm all three exact scopes are configured and selected during
-  consent, then reauthenticate the existing entry.
+- **Missing baseline scope:** confirm all three baseline scopes are configured
+  and selected during consent, then reauthenticate the existing entry.
+- **Optional entity unavailable:** confirm the matching option is enabled,
+  add its optional scope to Data Access, and reauthenticate that same person.
+  Declining the optional permission does not stop baseline sensors.
 - **Unverified-app warning:** expected for many private projects. Proceed only when you
   recognize and control the project shown by Google.
 - **Invalid client or secret:** verify the saved Application Credentials entry. Rotate

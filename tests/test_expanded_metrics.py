@@ -1,13 +1,17 @@
 """Tests for pure expanded Google Health daily metric normalization."""
 
 from datetime import UTC, date, datetime, timedelta
-from math import nan
+from math import inf, nan
 from types import MappingProxyType
 from typing import Any
 
 import pytest
 
-from custom_components.resiyhome_health_sync.expanded_metrics import normalize_expanded_day
+from custom_components.resiyhome_health_sync.expanded_metrics import (
+    normalize_expanded_day,
+    normalize_hydration_ml,
+    normalize_nutrition_energy,
+)
 from custom_components.resiyhome_health_sync.models import DailySummary, ExpandedDailyMetrics
 
 DAY = date(2042, 7, 21)
@@ -23,10 +27,98 @@ def _sample_time(
     return {"physicalTime": physical_time, "utcOffset": utc_offset}
 
 
+def _nutrition_point(
+    kcal: object,
+    *,
+    day: date = DAY,
+    hour: int = 7,
+    duration_minutes: int = 30,
+    utc_offset_seconds: int = 0,
+    data_point_name: str = "users/private/dataTypes/nutrition-log/dataPoints/nutrition-record",
+) -> dict[str, object]:
+    return {
+        "dataPointName": data_point_name,
+        "nutritionLog": {
+            "interval": _session_interval(
+                day,
+                hour,
+                duration_minutes=duration_minutes,
+                utc_offset_seconds=utc_offset_seconds,
+            ),
+            "energy": {"kcal": kcal, "userProvidedUnit": "KILOCALORIE"},
+        },
+    }
+
+
+def _hydration_point(
+    milliliters: object,
+    *,
+    day: date = DAY,
+    hour: int = 7,
+    duration_minutes: int = 30,
+    utc_offset_seconds: int = 0,
+    data_point_name: str = "users/private/dataTypes/hydration-log/dataPoints/hydration-record",
+) -> dict[str, object]:
+    return {
+        "dataPointName": data_point_name,
+        "hydrationLog": {
+            "interval": _session_interval(
+                day,
+                hour,
+                duration_minutes=duration_minutes,
+                utc_offset_seconds=utc_offset_seconds,
+            ),
+            "amountConsumed": {
+                "milliliters": milliliters,
+                "userProvidedUnit": "MILLILITER",
+            },
+        },
+    }
+
+
+@pytest.fixture
+def reconciled_nutrition_hydration_points() -> tuple[
+    dict[str, object], dict[str, object]
+]:
+    """Provide canonical ReconciledDataPoint nutrition and hydration records."""
+    return _nutrition_point(820.0), _hydration_point(900.0)
+
+
 def _civil_time(value: date, hour: int, *, nanos: int = 0) -> dict[str, object]:
     return {
         "date": {"year": value.year, "month": value.month, "day": value.day},
         "time": {"hours": hour, "nanos": nanos},
+    }
+
+
+def _session_interval(
+    value: date,
+    hour: int,
+    *,
+    duration_minutes: int,
+    utc_offset_seconds: int,
+) -> dict[str, object]:
+    local_start = datetime(value.year, value.month, value.day, hour)
+    local_end = local_start + timedelta(minutes=duration_minutes)
+    start = (local_start - timedelta(seconds=utc_offset_seconds)).replace(tzinfo=UTC)
+    end = (local_end - timedelta(seconds=utc_offset_seconds)).replace(tzinfo=UTC)
+    return {
+        "startTime": start.isoformat().replace("+00:00", "Z"),
+        "startUtcOffset": f"{utc_offset_seconds}s",
+        "endTime": end.isoformat().replace("+00:00", "Z"),
+        "endUtcOffset": f"{utc_offset_seconds}s",
+        "civilStartTime": _civil_time(value, hour),
+        "civilEndTime": {
+            "date": {
+                "year": local_end.year,
+                "month": local_end.month,
+                "day": local_end.day,
+            },
+            "time": {
+                "hours": local_end.hour,
+                "minutes": local_end.minute,
+            },
+        },
     }
 
 
@@ -130,6 +222,17 @@ def _direct() -> dict[str, list[dict[str, Any]]]:
             }
         ],
         "weight": [{"weight": {"sampleTime": _sample_time(), "weightGrams": 80500.0}}],
+        "body-fat": [
+            {"bodyFat": {"sampleTime": _sample_time(), "percentage": 21.4}}
+        ],
+        "height": [
+            {
+                "height": {
+                    "sampleTime": _sample_time(),
+                    "heightMillimeters": 1778.0,
+                }
+            }
+        ],
     }
 
 
@@ -162,6 +265,282 @@ def _rollups() -> dict[str, list[dict[str, Any]]]:
     }
 
 
+def test_canonical_reconcile_nutrition_and_hydration_normalize_only_scalars(
+    reconciled_nutrition_hydration_points: tuple[
+        dict[str, object], dict[str, object]
+    ],
+) -> None:
+    """Canonical reconcile records reduce to scalars without retaining identifiers."""
+    nutrition, hydration = reconciled_nutrition_hydration_points
+
+    energy = normalize_nutrition_energy([nutrition], DAY)
+    volume = normalize_hydration_ml([hydration], DAY)
+
+    assert energy == 820.0
+    assert volume == 900.0
+    retained = repr((energy, volume))
+    assert "nutrition-record" not in retained
+    assert "hydration-record" not in retained
+
+
+def test_sums_distinct_current_day_nutrition_and_hydration_reconcile_records() -> None:
+    """Every returned reconcile record contributes its allowlisted scalar."""
+    nutrition = [
+        _nutrition_point(
+            820.0,
+            data_point_name=(
+                "users/private/dataTypes/nutrition-log/dataPoints/nutrition-record-1"
+            ),
+        ),
+        _nutrition_point(
+            1000.0,
+            data_point_name=(
+                "users/private/dataTypes/nutrition-log/dataPoints/nutrition-record-2"
+            ),
+        ),
+    ]
+    hydration = [
+        _hydration_point(
+            900.0,
+            data_point_name=(
+                "users/private/dataTypes/hydration-log/dataPoints/hydration-record-1"
+            ),
+        ),
+        _hydration_point(
+            1200.0,
+            data_point_name=(
+                "users/private/dataTypes/hydration-log/dataPoints/hydration-record-2"
+            ),
+        ),
+    ]
+
+    assert normalize_nutrition_energy(nutrition, DAY) == 1820.0
+    assert normalize_hydration_ml(hydration, DAY) == 2100.0
+
+
+def test_nutrition_aggregates_preserve_true_zero_and_empty_days() -> None:
+    """A validated zero is data while a day with no matching rows is unavailable."""
+    assert normalize_nutrition_energy([_nutrition_point(0.0)], DAY) == 0.0
+    assert normalize_hydration_ml([_hydration_point(0.0)], DAY) == 0.0
+    assert normalize_nutrition_energy([], DAY) is None
+    assert normalize_hydration_ml([], DAY) is None
+
+
+def test_nutrition_aggregates_use_session_start_local_dates() -> None:
+    """Session civil-start semantics select the day despite adjacent UTC dates."""
+    nutrition = [
+        _nutrition_point(
+            600.0,
+            hour=22,
+            utc_offset_seconds=-14_400,
+        ),
+        _nutrition_point(
+            "private malformed value",
+            day=DAY + timedelta(days=1),
+        ),
+    ]
+    hydration = [
+        _hydration_point(
+            750.0,
+            hour=1,
+            utc_offset_seconds=7_200,
+        ),
+        _hydration_point(
+            "private malformed value",
+            day=DAY - timedelta(days=1),
+        ),
+    ]
+
+    assert normalize_nutrition_energy(nutrition, DAY) == 600.0
+    assert normalize_hydration_ml(hydration, DAY) == 750.0
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {
+            "nutritionLog": {
+                "interval": _session_interval(
+                    DAY, 7, duration_minutes=30, utc_offset_seconds=0
+                ),
+                "energy": {"kcal": True},
+            }
+        },
+        {
+            "nutritionLog": {
+                "interval": _session_interval(
+                    DAY, 7, duration_minutes=30, utc_offset_seconds=0
+                ),
+                "energy": {"kcal": -1.0},
+            }
+        },
+        {
+            "nutritionLog": {
+                "interval": _session_interval(
+                    DAY, 7, duration_minutes=30, utc_offset_seconds=0
+                ),
+                "energy": {"kcal": nan},
+            }
+        },
+        {
+            "nutritionLog": {
+                "interval": _session_interval(
+                    DAY, 7, duration_minutes=30, utc_offset_seconds=0
+                ),
+                "energy": {"calories": 100.0},
+                "kcal": 100.0,
+            }
+        },
+    ],
+)
+def test_any_matching_malformed_nutrition_row_rejects_the_entire_aggregate(
+    malformed: dict[str, object],
+) -> None:
+    """A valid row cannot hide a malformed current-day nutrition log."""
+    assert (
+        normalize_nutrition_energy([_nutrition_point(500.0), malformed], DAY)
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {
+            "hydrationLog": {
+                "interval": _session_interval(
+                    DAY, 7, duration_minutes=30, utc_offset_seconds=0
+                ),
+                "amountConsumed": {"milliliters": False},
+            }
+        },
+        {
+            "hydrationLog": {
+                "interval": _session_interval(
+                    DAY, 7, duration_minutes=30, utc_offset_seconds=0
+                ),
+                "amountConsumed": {"milliliters": -1.0},
+            }
+        },
+        {
+            "hydrationLog": {
+                "interval": _session_interval(
+                    DAY, 7, duration_minutes=30, utc_offset_seconds=0
+                ),
+                "amountConsumed": {"milliliters": inf},
+            }
+        },
+        {
+            "hydrationLog": {
+                "interval": _session_interval(
+                    DAY, 7, duration_minutes=30, utc_offset_seconds=0
+                ),
+                "amountConsumed": {"liters": 1.0},
+                "milliliters": 1000.0,
+            }
+        },
+    ],
+)
+def test_any_matching_malformed_hydration_row_rejects_the_entire_aggregate(
+    malformed: dict[str, object],
+) -> None:
+    """Hydration traverses only amountConsumed.milliliters and fails closed."""
+    assert normalize_hydration_ml([_hydration_point(500.0), malformed], DAY) is None
+
+
+@pytest.mark.parametrize(
+    ("normalizer", "point_factory", "payload_key"),
+    [
+        (normalize_nutrition_energy, _nutrition_point, "nutritionLog"),
+        (normalize_hydration_ml, _hydration_point, "hydrationLog"),
+    ],
+)
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing_interval",
+        "missing_start",
+        "missing_start_offset",
+        "missing_end",
+        "malformed_end",
+        "missing_end_offset",
+        "reversed_boundaries",
+        "mismatched_civil_start",
+        "mismatched_civil_end",
+    ],
+)
+def test_nutrition_session_intervals_fail_closed(
+    normalizer, point_factory, payload_key: str, case: str
+) -> None:
+    """Every candidate row needs coherent required and civil session boundaries."""
+    malformed = point_factory(100.0)
+    payload = malformed[payload_key]
+    interval = payload["interval"]
+    if case == "missing_interval":
+        payload.pop("interval")
+    elif case == "missing_start":
+        interval.pop("startTime")
+    elif case == "missing_start_offset":
+        interval.pop("startUtcOffset")
+    elif case == "missing_end":
+        interval.pop("endTime")
+    elif case == "malformed_end":
+        interval["endTime"] = "not-a-timestamp"
+    elif case == "missing_end_offset":
+        interval.pop("endUtcOffset")
+    elif case == "reversed_boundaries":
+        interval["endTime"] = "2042-07-21T06:00:00Z"
+    elif case == "mismatched_civil_start":
+        interval["civilStartTime"] = _civil_time(DAY + timedelta(days=1), 7)
+    else:
+        interval["civilEndTime"] = _civil_time(DAY + timedelta(days=1), 7)
+
+    assert normalizer([point_factory(500.0), malformed], DAY) is None
+
+
+@pytest.mark.parametrize(
+    ("normalizer", "point_factory"),
+    [
+        (normalize_nutrition_energy, _nutrition_point),
+        (normalize_hydration_ml, _hydration_point),
+    ],
+)
+def test_nutrition_session_inclusion_uses_civil_start_day(
+    normalizer, point_factory
+) -> None:
+    """Cross-midnight sessions follow start day and adjacent start days are ignored."""
+    points = [
+        point_factory(500.0, hour=23, duration_minutes=90),
+        point_factory(
+            "private malformed value",
+            day=DAY - timedelta(days=1),
+            hour=23,
+            duration_minutes=90,
+        ),
+        point_factory("private malformed value", day=DAY + timedelta(days=1)),
+    ]
+
+    assert normalizer(points, DAY) == 500.0
+
+
+@pytest.mark.parametrize(
+    ("normalizer", "points"),
+    [
+        (
+            normalize_nutrition_energy,
+            [_nutrition_point(1e308), _nutrition_point(1e308)],
+        ),
+        (
+            normalize_hydration_ml,
+            [_hydration_point(1e308), _hydration_point(1e308)],
+        ),
+    ],
+)
+def test_nutrition_aggregate_overflow_is_unavailable(normalizer, points) -> None:
+    """Finite rows cannot produce a retained non-finite aggregate."""
+    assert normalizer(points, DAY) is None
+
+
 def test_normalizes_documented_expanded_daily_metrics() -> None:
     """Each supported direct and daily-rollup shape becomes immutable daily data."""
     result = normalize_expanded_day(DAY, _direct(), _rollups(), include_weight=True)
@@ -189,6 +568,8 @@ def test_normalizes_documented_expanded_daily_metrics() -> None:
     assert result.heart_zone_thresholds["vigorous"] == (133, 159)
     assert result.heart_zone_calories["vigorous"] == 184.2
     assert result.weight_kg == 80.5
+    assert result.body_fat_percentage == 21.4
+    assert result.height_m == 1.778
 
 
 def test_current_day_uses_reconciled_intervals_when_daily_rollups_are_empty() -> None:
@@ -539,11 +920,182 @@ def test_out_of_range_oxygen_and_invalid_direct_shapes_fail_closed_by_group() ->
     assert result.vo2_max == 42.5
 
 
-def test_weight_is_ignored_until_explicitly_enabled() -> None:
+def test_body_measurements_are_ignored_until_explicitly_enabled() -> None:
     """The pure layer must not retain body measurements when the caller opts out."""
     result = normalize_expanded_day(DAY, _direct(), _rollups(), include_weight=False)
 
     assert result.weight_kg is None
+    assert result.body_fat_percentage is None
+    assert result.height_m is None
+
+
+@pytest.mark.parametrize("percentage", [0.0, 21.4, 100.0])
+def test_body_fat_accepts_documented_percentage_range(percentage: float) -> None:
+    """Body-fat endpoints and an ordinary finite percentage remain available."""
+    direct = _direct()
+    direct["body-fat"][0]["bodyFat"]["percentage"] = percentage
+
+    result = normalize_expanded_day(DAY, direct, _rollups(), include_weight=True)
+
+    assert result.body_fat_percentage == percentage
+
+
+@pytest.mark.parametrize(
+    "percentage",
+    [-0.1, 100.1, nan, inf, -inf, True, "21.4"],
+)
+def test_body_fat_rejects_out_of_range_or_non_finite_values(
+    percentage: object,
+) -> None:
+    """Malformed body fat cannot displace other valid body measurements."""
+    direct = _direct()
+    direct["body-fat"][0]["bodyFat"]["percentage"] = percentage
+
+    result = normalize_expanded_day(DAY, direct, _rollups(), include_weight=True)
+
+    assert result.body_fat_percentage is None
+    assert result.weight_kg == 80.5
+    assert result.height_m == 1.778
+
+
+@pytest.mark.parametrize(
+    "millimeters",
+    [0.0, -0.1, nan, inf, -inf, True, "1778"],
+)
+def test_height_rejects_non_positive_or_non_finite_values(
+    millimeters: object,
+) -> None:
+    """Height must be a finite positive numeric measurement."""
+    direct = _direct()
+    direct["height"][0]["height"]["heightMillimeters"] = millimeters
+
+    result = normalize_expanded_day(DAY, direct, _rollups(), include_weight=True)
+
+    assert result.height_m is None
+    assert result.weight_kg == 80.5
+    assert result.body_fat_percentage == 21.4
+
+
+def test_height_converts_millimeters_to_meters_without_rounding() -> None:
+    """The normalized stored value retains the source measurement precision."""
+    direct = _direct()
+    direct["height"][0]["height"]["heightMillimeters"] = 1778.123456
+
+    result = normalize_expanded_day(DAY, direct, _rollups(), include_weight=True)
+
+    assert result.height_m == 1.778123456
+
+
+@pytest.mark.parametrize(
+    ("data_type", "payload_key", "value_field"),
+    [
+        ("body-fat", "bodyFat", "body_fat_percentage"),
+        ("height", "height", "height_m"),
+    ],
+)
+def test_body_fat_and_height_require_timestamps_independently(
+    data_type: str,
+    payload_key: str,
+    value_field: str,
+) -> None:
+    """A missing timestamp invalidates only the affected measurement stream."""
+    direct = _direct()
+    direct[data_type][0][payload_key].pop("sampleTime")
+
+    result = normalize_expanded_day(DAY, direct, _rollups(), include_weight=True)
+
+    assert getattr(result, value_field) is None
+    assert result.weight_kg == 80.5
+    if data_type == "body-fat":
+        assert result.height_m == 1.778
+    else:
+        assert result.body_fat_percentage == 21.4
+
+
+def test_body_fat_and_height_ignore_points_outside_the_requested_day() -> None:
+    """Adjacent-day body points cannot populate a requested backfill day."""
+    direct = _direct()
+    direct["body-fat"][0]["bodyFat"]["sampleTime"] = _sample_time(
+        "2042-07-22T07:00:00Z"
+    )
+    direct["height"][0]["height"]["sampleTime"] = _sample_time(
+        "2042-07-20T07:00:00Z"
+    )
+
+    result = normalize_expanded_day(DAY, direct, _rollups(), include_weight=True)
+
+    assert result.body_fat_percentage is None
+    assert result.height_m is None
+    assert result.weight_kg == 80.5
+
+
+def test_latest_body_measurements_are_selected_independently() -> None:
+    """Each body stream selects its own latest valid timestamp."""
+    direct = _direct()
+    direct["weight"].append(
+        {
+            "weight": {
+                "sampleTime": _sample_time("2042-07-21T10:00:00Z"),
+                "weightGrams": 80000.0,
+            }
+        }
+    )
+    direct["body-fat"].append(
+        {
+            "bodyFat": {
+                "sampleTime": _sample_time("2042-07-21T11:00:00Z"),
+                "percentage": 20.8,
+            }
+        }
+    )
+    direct["height"].append(
+        {
+            "height": {
+                "sampleTime": _sample_time("2042-07-21T12:00:00Z"),
+                "heightMillimeters": 1779.5,
+            }
+        }
+    )
+
+    result = normalize_expanded_day(DAY, direct, _rollups(), include_weight=True)
+
+    assert result.weight_kg == 80.0
+    assert result.body_fat_percentage == 20.8
+    assert result.height_m == 1.7795
+
+
+def test_latest_valid_body_measurements_ignore_later_malformed_points() -> None:
+    """A malformed newer point cannot displace each stream's earlier valid value."""
+    direct = _direct()
+    direct["weight"].append(
+        {
+            "weight": {
+                "sampleTime": _sample_time("2042-07-21T10:00:00Z"),
+                "weightGrams": nan,
+            }
+        }
+    )
+    direct["body-fat"].append(
+        {
+            "bodyFat": {
+                "percentage": 20.8,
+            }
+        }
+    )
+    direct["height"].append(
+        {
+            "height": {
+                "sampleTime": _sample_time("2042-07-21T12:00:00Z"),
+                "heightMillimeters": 0.0,
+            }
+        }
+    )
+
+    result = normalize_expanded_day(DAY, direct, _rollups(), include_weight=True)
+
+    assert result.weight_kg == 80.5
+    assert result.body_fat_percentage == 21.4
+    assert result.height_m == 1.778
 
 
 def test_latest_valid_weight_sample_is_used_when_multiple_exist() -> None:

@@ -2,6 +2,56 @@
 
 All notable public changes to Health Sync by ResiyHome are recorded here.
 
+## Unreleased
+
+### Added
+
+- Added Total calories burned today and detailed sleep-timing entities from the
+  existing baseline Google Health authorization.
+- Expanded `include_body_measurements` to Weight, Body-fat percentage, and
+  Height. All three body entities are created disabled by default in the Home
+  Assistant entity registry.
+- Added per-person `include_nutrition` support for Calories consumed today and
+  Water consumed today through the optional
+  `googlehealth.nutrition.readonly` scope. This release starts normalized
+  nutrition with the first successful opt-in refresh and has
+  no historical nutrition backfill.
+- Added per-person `include_paired_devices` support through the optional
+  `googlehealth.settings.readonly` scope. Each current Google paired tracker or
+  scale can expose Battery level and Paired-device last sync entities.
+
+### Changed
+
+- Upgrades preserve existing config entries and baseline-only authorizations. New
+  optional permissions are requested through reauthorization on the same
+  person's entry, and declining one leaves baseline sensors working.
+- Added the eight static person entity keys without changing existing entity
+  identities. Paired battery and sync entities are created dynamically per
+  person and paired-device identity.
+- Clarified that setup accepts a person name and derives the slug used for
+  entity and action identity, while normalized history storage is owned by the
+  Home Assistant config-entry ID.
+- Extended normalized history with total calories, sleep timing, body fat,
+  height, and current-day nutrition fields. Paired-device metadata remains
+  current only and is excluded from normalized history.
+
+### Privacy
+
+- Food names, raw nutrition logs, MAC addresses, raw paired-device resource
+  IDs, and device feature lists are excluded from normalized storage and
+  diagnostics.
+- Disabling an optional capability stops future requests. Nutrition values
+  already normalized for prior opt-in days and Home Assistant Recorder states
+  are not automatically erased; removal and purge decisions remain explicit
+  operator actions.
+
+### Upgrade
+
+- Update normally without deleting or re-adding the integration. Baseline
+  sensors require no reauthorization.
+- Enable nutrition or paired devices from each person's options, then complete
+  Google reauthorization for that same person. Repeat per person.
+
 ## 1.0.4 - 2026-07-26
 
 ### Fixed

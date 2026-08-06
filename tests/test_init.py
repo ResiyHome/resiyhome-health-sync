@@ -2,15 +2,18 @@
 
 import asyncio
 import gc
+import json
 import traceback
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from homeassistant import config_entries
 from homeassistant.components.application_credentials import ClientCredential
+from homeassistant.const import EVENT_HOMEASSISTANT_FINAL_WRITE
 from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryError, ConfigEntryNotReady
 from homeassistant.helpers import config_entry_oauth2_flow
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
@@ -32,7 +35,26 @@ from custom_components.resiyhome_health_sync.api import (
 from custom_components.resiyhome_health_sync.application_credentials import (
     HealthSyncOAuth2Implementation,
 )
-from custom_components.resiyhome_health_sync.const import DOMAIN, SCAN_INTERVAL, SCOPES
+from custom_components.resiyhome_health_sync.capabilities import (
+    CapabilityId,
+    validate_granted_scopes,
+)
+from custom_components.resiyhome_health_sync.const import (
+    BASE_SCOPES,
+    DOMAIN,
+    NUTRITION_SCOPE,
+    SCAN_INTERVAL,
+    SCOPES,
+)
+from custom_components.resiyhome_health_sync.models import (
+    CoordinatorSnapshot,
+    DailySummary,
+    ExpandedDailyMetrics,
+)
+from custom_components.resiyhome_health_sync.storage import (
+    HealthHistoryStore,
+    HistoryStoreError,
+)
 
 
 def _entry(
@@ -123,6 +145,7 @@ def _lifecycle_patches(*, refresh_error: Exception | None = None):
     client = MagicMock()
     history = MagicMock()
     history.async_load = AsyncMock(return_value=[])
+    history.async_shutdown = AsyncMock()
     coordinator = MagicMock()
     coordinator.async_refresh_current = AsyncMock()
     if refresh_error is not None:
@@ -179,6 +202,7 @@ async def test_setup_loads_history_refreshes_then_forwards_and_starts_backfill(h
     assert entry.runtime_data.client is client
     assert entry.runtime_data.history is history
     assert entry.runtime_data.coordinator is coordinator
+    history.async_shutdown.assert_not_awaited()
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -213,7 +237,7 @@ async def test_setup_passes_body_measurement_option_to_coordinator(hass, enabled
 async def test_setup_maps_first_refresh_failures(hass, caplog, error, expected) -> None:
     """Auth failures request reauth while transient failures remain retryable."""
     entry = _entry(hass)
-    _client, _history, _coordinator, patches = _lifecycle_patches(refresh_error=error)
+    _client, history, _coordinator, patches = _lifecycle_patches(refresh_error=error)
 
     with (
         patches[0],
@@ -230,6 +254,77 @@ async def test_setup_maps_first_refresh_failures(hass, caplog, error, expected) 
     exposed = "".join(traceback.format_exception(raised.value)) + caplog.text
     assert "secret auth detail" not in exposed
     assert "secret transport detail" not in exposed
+    history.async_shutdown.assert_awaited_once_with()
+
+
+async def test_setup_shuts_history_after_coordinator_construction_failure(hass) -> None:
+    """The earliest failure after store construction still closes that store."""
+    entry = _entry(hass)
+    _client, history, _coordinator, patches = _lifecycle_patches()
+    failure = RuntimeError("coordinator construction failure marker")
+
+    with (
+        patches[0],
+        patches[1],
+        patch(
+            "custom_components.resiyhome_health_sync.HealthSyncCoordinator",
+            side_effect=failure,
+        ),
+        pytest.raises(RuntimeError, match="coordinator construction failure marker"),
+    ):
+        await async_setup_entry(hass, entry)
+
+    history.async_load.assert_not_awaited()
+    history.async_shutdown.assert_awaited_once_with()
+    assert not hasattr(entry, "runtime_data")
+
+
+async def test_setup_shuts_history_after_load_failure(hass) -> None:
+    """A rejected history load closes its instance before setup reports repair."""
+    entry = _entry(hass)
+    _client, history, coordinator, patches = _lifecycle_patches()
+    history.async_load.side_effect = HistoryStoreError("corrupt history")
+
+    with (
+        patches[0],
+        patches[1],
+        patches[2],
+        pytest.raises(ConfigEntryError, match="requires repair"),
+    ):
+        await async_setup_entry(hass, entry)
+
+    history.async_shutdown.assert_awaited_once_with()
+    coordinator.async_refresh_current.assert_not_awaited()
+    assert not hasattr(entry, "runtime_data")
+
+
+async def test_cancelled_setup_shuts_history_before_propagating(hass) -> None:
+    """Cancellation after store construction cannot abandon delayed callbacks."""
+    entry = _entry(hass)
+    _client, history, coordinator, patches = _lifecycle_patches()
+    refresh_started = asyncio.Event()
+    shutdown_finished = asyncio.Event()
+
+    async def blocked_refresh() -> None:
+        refresh_started.set()
+        await asyncio.Event().wait()
+
+    async def shutdown_history() -> None:
+        shutdown_finished.set()
+
+    coordinator.async_refresh_current.side_effect = blocked_refresh
+    history.async_shutdown.side_effect = shutdown_history
+
+    with patches[0], patches[1], patches[2]:
+        setup = asyncio.create_task(async_setup_entry(hass, entry))
+        await refresh_started.wait()
+        setup.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await setup
+
+    assert shutdown_finished.is_set()
+    history.async_shutdown.assert_awaited_once_with()
+    assert not hasattr(entry, "runtime_data")
 
 
 async def test_refreshed_tokens_update_only_the_matching_config_entry(hass) -> None:
@@ -334,6 +429,51 @@ async def test_application_credential_entry_uses_registered_oauth_client(hass) -
     assert "client_secret" not in entry.data
 
 
+async def test_baseline_entry_with_missing_optional_scope_still_sets_up(hass) -> None:
+    """An unavailable optional capability cannot turn valid baseline access into reauth."""
+    _register_application_credential_implementation(hass)
+    entry = _application_credential_entry(hass)
+    hass.config_entries.async_update_entry(
+        entry,
+        options={
+            "include_body_measurements": False,
+            "include_nutrition": True,
+            "include_paired_devices": False,
+        },
+    )
+    _client, _history, _coordinator, patches = _lifecycle_patches()
+
+    with (
+        patches[0] as client_class,
+        patches[1],
+        patches[2],
+        patch.object(hass.config_entries, "async_forward_entry_setups", new=AsyncMock()),
+    ):
+        assert await async_setup_entry(hass, entry) is True
+
+    scope_grant = client_class.call_args.kwargs["scope_grant"]
+    assert scope_grant == validate_granted_scopes(BASE_SCOPES, entry.options)
+    assert entry.runtime_data.scope_grant is scope_grant
+    assert scope_grant.baseline_valid is True
+    assert scope_grant.enabled_capabilities >= {
+        CapabilityId.CORE_ACTIVITY,
+        CapabilityId.SLEEP,
+        CapabilityId.NUTRITION,
+    }
+    assert scope_grant.available_capabilities >= {
+        CapabilityId.CORE_ACTIVITY,
+        CapabilityId.SLEEP,
+    }
+    assert scope_grant.missing_optional_scopes == {NUTRITION_SCOPE}
+    assert (
+        hass.config_entries.flow.async_progress_by_handler(
+            DOMAIN,
+            match_context={"entry_id": entry.entry_id},
+        )
+        == []
+    )
+
+
 async def test_auth_implementation_takes_precedence_over_legacy_client_fields(hass) -> None:
     """Stale legacy fields cannot override HA application credentials."""
     _register_application_credential_implementation(hass)
@@ -387,6 +527,34 @@ async def test_token_update_retains_refresh_token_when_replacement_is_absent(has
 
     assert entry.data["access_token"] == "new-access-token"
     assert entry.data["refresh_token"] == "sample_alpha-refresh-token"
+
+
+async def test_token_update_persists_actual_supported_optional_scopes(hass) -> None:
+    """Refresh persistence cannot erase an optional permission retained by Google."""
+    entry = _entry(hass)
+    _client, _history, _coordinator, patches = _lifecycle_patches()
+
+    with (
+        patches[0] as client_class,
+        patches[1],
+        patches[2],
+        patch.object(hass.config_entries, "async_forward_entry_setups", new=AsyncMock()),
+    ):
+        await async_setup_entry(hass, entry)
+
+    callback = client_class.call_args.kwargs["token_update_callback"]
+    await callback(
+        OAuthTokenState(
+            **{
+                "access" + "_token": "new-access-token",
+                "refresh" + "_token": "new-refresh-token",
+                "expires_at": datetime.now(UTC) + timedelta(hours=1),
+                "scopes": frozenset((*BASE_SCOPES, NUTRITION_SCOPE)),
+            }
+        )
+    )
+
+    assert entry.data["scopes"] == [*BASE_SCOPES, NUTRITION_SCOPE]
 
 
 @pytest.mark.parametrize(
@@ -622,6 +790,13 @@ async def test_config_entry_manager_forward_failure_cleans_partial_runtime(hass,
     entry = _entry(hass)
     _client, history, coordinator, patches = _lifecycle_patches()
     failure = RuntimeError("platform forwarding failure marker")
+    shutdown_saw_runtime = False
+
+    async def shutdown_history() -> None:
+        nonlocal shutdown_saw_runtime
+        shutdown_saw_runtime = getattr(entry, "runtime_data", None) is not None
+
+    history.async_shutdown.side_effect = shutdown_history
 
     with (
         patches[0],
@@ -642,6 +817,8 @@ async def test_config_entry_manager_forward_failure_cleans_partial_runtime(hass,
         task.get_name().startswith("Health Sync backfill") for task in asyncio.all_tasks()
     )
     coordinator.async_backfill_step.assert_not_awaited()
+    history.async_shutdown.assert_awaited_once_with()
+    assert shutdown_saw_runtime
     assert not hasattr(history, "async_remove") or history.async_remove.call_count == 0
     assert "platform forwarding failure marker" in caplog.text
 
@@ -691,6 +868,7 @@ async def test_config_entry_manager_task_creation_failure_closes_backfill_corout
         task.get_name().startswith("Health Sync backfill") for task in asyncio.all_tasks()
     )
     coordinator.async_backfill_step.assert_not_awaited()
+    history.async_shutdown.assert_awaited_once_with()
     assert not hasattr(history, "async_remove") or history.async_remove.call_count == 0
     assert original_exception_logged
 
@@ -698,7 +876,7 @@ async def test_config_entry_manager_task_creation_failure_closes_backfill_corout
 async def test_late_setup_failure_then_retry_does_not_accumulate_reload_callbacks(hass) -> None:
     """A failed setup cannot retain callbacks that duplicate later reloads."""
     entry = _entry(hass)
-    _client, _history, _coordinator, patches = _lifecycle_patches()
+    _client, history, _coordinator, patches = _lifecycle_patches()
     failure = RuntimeError("interface registration failure marker")
 
     with (
@@ -714,11 +892,130 @@ async def test_late_setup_failure_then_retry_does_not_accumulate_reload_callback
         with pytest.raises(RuntimeError, match="interface registration failure marker"):
             await async_setup_entry(hass, entry)
         assert entry.update_listeners == []
+        history.async_shutdown.assert_awaited_once_with()
 
         assert await async_setup_entry(hass, entry) is True
 
     assert register_interfaces.call_count == 2
+    history.async_shutdown.assert_awaited_once_with()
     assert entry.update_listeners == []
+
+
+async def test_failed_setup_real_store_retry_cannot_resurrect_old_body_snapshot(
+    hass,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed setup drains its real store before a same-key retry can scrub it."""
+    entry = _entry(hass)
+    today = date(2042, 7, 21)
+    measured = DailySummary(
+        date=date(2042, 7, 15),
+        steps=7300,
+        expanded=ExpandedDailyMetrics(
+            weight_kg=80.5,
+            body_fat_percentage=21.4,
+            height_m=1.778,
+        ),
+    )
+    baseline = DailySummary(
+        date=date(2042, 7, 16),
+        steps=7100,
+        expanded=ExpandedDailyMetrics(floors=4),
+    )
+    stores: list[HealthHistoryStore] = []
+
+    def history_factory(hass, entry_id: str) -> HealthHistoryStore:
+        history = HealthHistoryStore(hass, entry_id)
+        async def write_store_document(data: dict[str, object]) -> None:
+            if "data_func" in data:
+                data["data"] = data.pop("data_func")()
+            path = Path(history._store.path)
+            serialized = json.dumps(data)
+
+            def write() -> None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(serialized)
+
+            await hass.async_add_executor_job(write)
+
+        monkeypatch.setattr(history._store, "_async_write_data", write_store_document)
+        stores.append(history)
+        return history
+
+    def coordinator_factory(_hass, _client, history, **_kwargs):
+        coordinator = MagicMock()
+        coordinator.data = CoordinatorSnapshot(
+            backfill_complete=True,
+            expanded_backfill_complete=True,
+        )
+
+        async def refresh_current() -> CoordinatorSnapshot:
+            if len(stores) == 1:
+                await history.async_set_backfill_checkpoint(date(2042, 7, 1))
+                await history.async_apply_body_measurement_option(True, today)
+                await history.async_checkpoint_expanded(baseline, date(2042, 7, 7))
+                await history.async_upsert(measured)
+            else:
+                await history.async_apply_body_measurement_option(False, today)
+            return coordinator.data
+
+        coordinator.async_refresh_current = AsyncMock(side_effect=refresh_current)
+        coordinator.async_set_updated_data = MagicMock()
+        coordinator.async_backfill_step = AsyncMock()
+        return coordinator
+
+    failure = RuntimeError("platform forwarding failure marker")
+    forward = AsyncMock(side_effect=[failure, None])
+
+    with (
+        patch(
+            "custom_components.resiyhome_health_sync.GoogleHealthClient",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "custom_components.resiyhome_health_sync.HealthHistoryStore",
+            side_effect=history_factory,
+        ),
+        patch(
+            "custom_components.resiyhome_health_sync.HealthSyncCoordinator",
+            side_effect=coordinator_factory,
+        ),
+        patch.object(hass.config_entries, "async_forward_entry_setups", new=forward),
+        patch.object(
+            hass.config_entries,
+            "async_unload_platforms",
+            new=AsyncMock(return_value=True),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="platform forwarding failure marker"):
+            await async_setup_entry(hass, entry)
+        assert not hasattr(entry, "runtime_data")
+
+        hass.config_entries.async_update_entry(
+            entry,
+            options={"include_body_measurements": False},
+        )
+        assert await async_setup_entry(hass, entry) is True
+
+        old, current = stores
+        old._store._async_schedule_callback_delayed_write()
+        hass.bus.async_fire(EVENT_HOMEASSISTANT_FINAL_WRITE)
+        await hass.async_block_till_done()
+
+        restarted = HealthHistoryStore(hass, entry.entry_id)
+        rows = await restarted.async_load()
+        assert restarted.body_measurements_enabled is False
+        assert restarted.backfill_cursor == date(2042, 7, 1)
+        assert restarted.expanded_backfill_cursor == date(2042, 7, 7)
+        assert [row.date for row in rows] == [measured.date, baseline.date]
+        assert all(row.expanded.weight_kg is None for row in rows)
+        assert all(row.expanded.body_fat_percentage is None for row in rows)
+        assert all(row.expanded.height_m is None for row in rows)
+        assert rows[0].steps == measured.steps
+        assert rows[1].expanded.floors == baseline.expanded.floors
+        assert entry.runtime_data.history is current
+
+        assert await async_unload_entry(hass, entry) is True
 
 
 async def test_unload_cancels_and_awaits_backfill_without_removing_history(hass) -> None:
@@ -727,6 +1024,7 @@ async def test_unload_cancels_and_awaits_backfill_without_removing_history(hass)
     client, history, coordinator, patches = _lifecycle_patches()
     started = asyncio.Event()
     cancelled = asyncio.Event()
+    shutdown_after_cancel = False
     coordinator.data.backfill_complete = False
 
     async def blocked_backfill():
@@ -737,7 +1035,12 @@ async def test_unload_cancels_and_awaits_backfill_without_removing_history(hass)
             cancelled.set()
             raise
 
+    async def shutdown_history() -> None:
+        nonlocal shutdown_after_cancel
+        shutdown_after_cancel = cancelled.is_set()
+
     coordinator.async_backfill_step.side_effect = blocked_backfill
+    history.async_shutdown.side_effect = shutdown_history
 
     with (
         patches[0],
@@ -754,7 +1057,9 @@ async def test_unload_cancels_and_awaits_backfill_without_removing_history(hass)
         assert await async_unload_entry(hass, entry) is True
 
     assert cancelled.is_set()
+    assert shutdown_after_cancel
     unload_mock.assert_awaited_once_with(entry, ("sensor", "binary_sensor"))
     assert history.async_load.await_count == 1
+    history.async_shutdown.assert_awaited_once_with()
     assert not hasattr(history, "async_remove") or history.async_remove.call_count == 0
     assert entry.runtime_data.client is client

@@ -7,7 +7,10 @@ from unittest.mock import AsyncMock
 from zoneinfo import ZoneInfo
 
 import pytest
+from aiohttp import ContentTypeError
+from aiohttp.client_reqrep import RequestInfo
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from multidict import CIMultiDict, CIMultiDictProxy
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
 from yarl import URL
 
@@ -21,12 +24,23 @@ from custom_components.resiyhome_health_sync.api import (
     build_time_filter,
     get_data_type_operations,
 )
-from custom_components.resiyhome_health_sync.const import HEALTH_API_BASE_URL, SCOPES, TOKEN_URL
+from custom_components.resiyhome_health_sync.capabilities import validate_granted_scopes
+from custom_components.resiyhome_health_sync.const import (
+    BASE_SCOPES,
+    HEALTH_API_BASE_URL,
+    NUTRITION_SCOPE,
+    SCOPES,
+    TOKEN_URL,
+)
 
 STEPS_URL = f"{HEALTH_API_BASE_URL}/users/me/dataTypes/steps/dataPoints"
+PAIRED_DEVICES_URL = f"{HEALTH_API_BASE_URL}/users/me/pairedDevices"
 RECONCILE_STEPS_URL = f"{STEPS_URL}:reconcile"
 DAILY_ROLLUP_ACTIVE_ZONE_MINUTES_URL = (
     f"{HEALTH_API_BASE_URL}/users/me/dataTypes/active-zone-minutes/dataPoints:dailyRollUp"
+)
+DAILY_ROLLUP_TOTAL_CALORIES_URL = (
+    f"{HEALTH_API_BASE_URL}/users/me/dataTypes/total-calories/dataPoints:dailyRollUp"
 )
 VALID_REFRESH_RESPONSE = {
     "access" + "_token": "refreshed-access-token",
@@ -37,6 +51,43 @@ VALID_REFRESH_RESPONSE = {
 RAW_START = datetime(2042, 7, 12, 0, 0, tzinfo=UTC)
 RAW_END = datetime(2042, 7, 13, 0, 0, tzinfo=UTC)
 AUTHORIZATION_VALUE = " ".join(("Bearer", "initial-access-token"))
+
+
+def _exception_graph(error: BaseException) -> tuple[BaseException, ...]:
+    """Walk every explicit and implicit exception link exactly once."""
+    pending = [error]
+    found: list[BaseException] = []
+    while pending:
+        current = pending.pop()
+        if any(current is seen for seen in found):
+            continue
+        found.append(current)
+        for linked in (current.__cause__, current.__context__):
+            if linked is not None:
+                pending.append(linked)
+    return tuple(found)
+
+
+def _assert_sanitized_update_failure(
+    error: UpdateFailed, *private_values: str
+) -> None:
+    """Require a cause-free public error with no sensitive reachable state."""
+    graph = _exception_graph(error)
+    assert graph == (error,)
+    reachable_text = "\n".join(
+        repr(
+            (
+                current,
+                current.args,
+                getattr(current, "doc", None),
+                getattr(current, "request_info", None),
+                getattr(current, "headers", None),
+            )
+        )
+        for current in graph
+    )
+    for private_value in private_values:
+        assert private_value not in reachable_text
 
 
 @pytest.fixture
@@ -66,6 +117,7 @@ def client(
                     "scopes": frozenset(SCOPES),
                 }
             ),
+            "scope_grant": validate_granted_scopes(SCOPES, {}),
             "token_update_callback": token_update_callback,
         },
     )
@@ -138,6 +190,27 @@ async def test_exchange_persists_only_valid_full_scope_token_state(
     assert headers == {"Content-Type": "application/x-www-form-urlencoded"}
 
 
+async def test_exchange_accepts_and_persists_supported_optional_scope(
+    client, aioclient_mock, token_update_callback
+) -> None:
+    """A supported optional permission cannot be rejected as an extra scope."""
+    scopes = (*BASE_SCOPES, NUTRITION_SCOPE)
+    aioclient_mock.post(
+        TOKEN_URL,
+        json={
+            "access" + "_token": "new-access-token",
+            "refresh" + "_token": "new-refresh-token",
+            "expires_in": 3600,
+            "scope": " ".join(scopes),
+        },
+    )
+
+    state = await client.async_exchange_code("one-time-code")
+
+    assert state.scopes == frozenset(scopes)
+    token_update_callback.assert_awaited_once_with(state)
+
+
 async def test_refresh_preserves_existing_refresh_token(
     client, aioclient_mock, token_update_callback
 ) -> None:
@@ -154,13 +227,39 @@ async def test_failed_token_persistence_keeps_the_last_successful_state(
     client, aioclient_mock, token_update_callback
 ) -> None:
     """The in-memory token state is not replaced before coordinator persistence succeeds."""
-    token_update_callback.side_effect = RuntimeError("storage unavailable")
+    private_persisted_value = "private-refresh-token-in-storage-error"
+    token_update_callback.side_effect = RuntimeError(private_persisted_value)
     aioclient_mock.post(TOKEN_URL, json=VALID_REFRESH_RESPONSE)
 
-    with pytest.raises(UpdateFailed):
+    with pytest.raises(UpdateFailed) as raised:
         await client.async_refresh_access_token()
 
     assert client._token_state.access_token == "initial-access-token"
+    _assert_sanitized_update_failure(raised.value, private_persisted_value)
+
+
+async def test_oauth_malformed_json_has_no_reachable_private_exception_state(
+    client, aioclient_mock
+) -> None:
+    """Malformed token responses cannot survive in a generic retryable error."""
+    token_field = "".join(("access", "_token"))
+    private_bearer_value = "private-access-token-in-raw-body"
+    private_response = f'{{"{token_field}":"{private_bearer_value}"'
+    aioclient_mock.post(
+        TOKEN_URL,
+        text=private_response,
+        headers={"Content-Type": "application/json"},
+    )
+
+    with pytest.raises(UpdateFailed) as raised:
+        await client.async_refresh_access_token()
+
+    assert str(raised.value) == "Google OAuth returned an invalid response"
+    _assert_sanitized_update_failure(
+        raised.value,
+        private_bearer_value,
+        private_response,
+    )
 
 
 async def test_refresh_retries_request_once(client, aioclient_mock, token_update_callback) -> None:
@@ -233,6 +332,163 @@ async def test_list_data_points_paginates_with_get_only(client, aioclient_mock) 
         "Accept": "application/json",
         "Authorization": AUTHORIZATION_VALUE,
     }
+
+
+async def test_list_paired_devices_uses_official_endpoint_and_paginates(
+    client, aioclient_mock
+) -> None:
+    """Paired devices use the documented v4 collection and GET continuation contract."""
+    first_device = {"name": "users/me/pairedDevices/first", "deviceType": "TRACKER"}
+    second_device = {"name": "users/me/pairedDevices/second", "deviceType": "SCALE"}
+    aioclient_mock.get(
+        PAIRED_DEVICES_URL,
+        params={"pageSize": 100, "pageToken": "private-next-page"},
+        json={"pairedDevices": [second_device]},
+    )
+    aioclient_mock.get(
+        PAIRED_DEVICES_URL,
+        params={"pageSize": 100},
+        json={
+            "pairedDevices": [first_device],
+            "nextPageToken": "private-next-page",
+        },
+    )
+
+    result = await client.async_list_paired_devices()
+
+    assert result == [first_device, second_device]
+    assert [call[0].lower() for call in aioclient_mock.mock_calls] == ["get", "get"]
+    assert all(
+        call[3]
+        == {
+            "Accept": "application/json",
+            "Authorization": AUTHORIZATION_VALUE,
+        }
+        for call in aioclient_mock.mock_calls
+    )
+
+
+async def test_list_paired_devices_stops_after_twenty_pages(
+    client, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unique private continuation tokens cannot exceed the paired-device page bound."""
+    request_count = 0
+
+    async def endless_pages(_url: str, _params: dict[str, str | int]) -> dict[str, object]:
+        nonlocal request_count
+        request_count += 1
+        return {
+            "pairedDevices": [],
+            "nextPageToken": f"private-page-token-{request_count}",
+        }
+
+    monkeypatch.setattr(client, "_async_get_json", endless_pages)
+
+    with pytest.raises(UpdateFailed) as raised:
+        await client.async_list_paired_devices()
+
+    assert request_count == 20
+    assert str(raised.value) == "Google Health pagination exceeded the page limit"
+    assert "private-page-token" not in str(raised.value)
+
+
+async def test_paired_device_403_uses_redacted_retryable_error(client, aioclient_mock) -> None:
+    """Settings permission failures remain retryable and do not expose provider payloads."""
+    private_resource = "users/me/pairedDevices/private-device-123"
+    aioclient_mock.get(
+        PAIRED_DEVICES_URL,
+        status=403,
+        json={"error": {"message": private_resource}},
+    )
+
+    with pytest.raises(UpdateFailed) as raised:
+        await client.async_list_paired_devices()
+
+    assert str(raised.value) == "Google Health rejected the data request"
+    assert private_resource not in str(raised.value)
+
+
+async def test_paired_device_malformed_json_has_no_reachable_raw_response(
+    client, aioclient_mock
+) -> None:
+    """Malformed JSON cannot remain attached to the paired-device boundary error."""
+    private_resource = "users/me/pairedDevices/private-device-in-raw-body"
+    private_mac = "AA:BB:CC:DD:EE:FF"
+    private_response = (
+        f'{{"pairedDevices":[{{"name":"{private_resource}",'
+        f'"macAddress":"{private_mac}"}}]'
+    )
+    aioclient_mock.get(
+        PAIRED_DEVICES_URL,
+        text=private_response,
+        headers={"Content-Type": "application/json"},
+    )
+
+    with pytest.raises(UpdateFailed) as raised:
+        await client.async_list_paired_devices()
+
+    assert str(raised.value) == "Google Health returned an invalid response"
+    _assert_sanitized_update_failure(
+        raised.value,
+        private_resource,
+        private_mac,
+        private_response,
+    )
+
+
+async def test_paired_device_client_response_error_has_no_reachable_request_secrets(
+    client, aioclient_mock
+) -> None:
+    """Aiohttp request details cannot survive the paired-device transport boundary."""
+    private_page_token = "private-continuation-token-in-url"
+    private_bearer = "initial-access-token"
+    private_resource = "users/me/pairedDevices/private-device-in-error"
+    private_headers = CIMultiDictProxy(
+        CIMultiDict({"Authorization": f"Bearer {private_bearer}"})
+    )
+    private_url = URL(PAIRED_DEVICES_URL).with_query(
+        {"pageSize": 100, "pageToken": private_page_token}
+    )
+    content_type_error = ContentTypeError(
+        RequestInfo(private_url, "GET", private_headers),
+        (),
+        message=f"unexpected body for {private_resource}",
+        headers={"Content-Type": "text/plain"},
+    )
+    content_type_response = AiohttpClientMockResponse(
+        "get",
+        URL(PAIRED_DEVICES_URL),
+        text=f"unexpected body for {private_resource}",
+        headers={"Content-Type": "text/plain"},
+    )
+    content_type_response.json = AsyncMock(side_effect=content_type_error)
+    responses = [
+        AiohttpClientMockResponse(
+            "get",
+            URL(PAIRED_DEVICES_URL),
+            json={
+                "pairedDevices": [],
+                "nextPageToken": private_page_token,
+            },
+        ),
+        content_type_response,
+    ]
+
+    async def get_response(*_args: Any) -> AiohttpClientMockResponse:
+        return responses.pop(0)
+
+    aioclient_mock.get(PAIRED_DEVICES_URL, side_effect=get_response)
+
+    with pytest.raises(UpdateFailed) as raised:
+        await client.async_list_paired_devices()
+
+    assert str(raised.value) == "Google Health request failed"
+    _assert_sanitized_update_failure(
+        raised.value,
+        private_page_token,
+        private_bearer,
+        private_resource,
+    )
 
 
 @pytest.mark.parametrize(
@@ -414,6 +670,35 @@ def test_build_time_filter_rejects_unsupported_data_types() -> None:
             datetime(2042, 7, 12, tzinfo=UTC),
             datetime(2042, 7, 13, tzinfo=UTC),
         )
+
+
+@pytest.mark.parametrize(
+    ("data_type", "expected"),
+    [
+        (
+            "nutrition-log",
+            'nutrition_log.interval.civil_start_time >= "2042-07-12T00:00:00" '
+            'AND nutrition_log.interval.civil_start_time < "2042-07-13T00:00:00"',
+        ),
+        (
+            "hydration-log",
+            'hydration_log.interval.civil_start_time >= "2042-07-12T00:00:00" '
+            'AND hydration_log.interval.civil_start_time < "2042-07-13T00:00:00"',
+        ),
+    ],
+)
+def test_nutrition_data_types_use_documented_session_filters_and_operations(
+    data_type: str, expected: str
+) -> None:
+    """Nutrition session reads use civil-start grammar and documented read operations."""
+    detroit = ZoneInfo("America/Detroit")
+    start = datetime(2042, 7, 12, tzinfo=detroit)
+    end = datetime(2042, 7, 13, tzinfo=detroit)
+
+    assert build_time_filter(data_type, start, end) == expected
+    assert get_data_type_operations(data_type) == frozenset(
+        {"list", "get", "reconcile", "rollup", "daily_rollup"}
+    )
 
 
 @pytest.mark.parametrize(
@@ -639,6 +924,57 @@ async def test_daily_rollup_posts_the_civil_range_and_paginates(client, aioclien
     }
 
 
+async def test_total_calories_daily_rollup_preserves_zero_and_positive_values(
+    client, aioclient_mock
+) -> None:
+    """Total-calorie daily rollups retain an explicit zero from the API response."""
+    points = [
+        {
+            "civilStartTime": {"date": {"year": 2042, "month": 7, "day": 12}},
+            "civilEndTime": {"date": {"year": 2042, "month": 7, "day": 13}},
+            "totalCalories": {"kcalSum": 0.0},
+        },
+        {
+            "civilStartTime": {"date": {"year": 2042, "month": 7, "day": 13}},
+            "civilEndTime": {"date": {"year": 2042, "month": 7, "day": 14}},
+            "totalCalories": {"kcalSum": 2345.6},
+        },
+    ]
+    aioclient_mock.post(
+        DAILY_ROLLUP_TOTAL_CALORIES_URL,
+        json={"rollupDataPoints": points},
+    )
+
+    result = await client.async_daily_rollup_data_points(
+        "total-calories",
+        start=RAW_START,
+        end=RAW_START + timedelta(days=2),
+        source_family="all-sources",
+    )
+
+    assert result == points
+    assert aioclient_mock.mock_calls[0][2] == {
+        "range": {
+            "start": {"date": {"year": 2042, "month": 7, "day": 12}},
+            "end": {"date": {"year": 2042, "month": 7, "day": 14}},
+        },
+        "windowSizeDays": 1,
+        "pageSize": 10000,
+        "dataSourceFamily": "users/me/dataSourceFamilies/all-sources",
+    }
+
+
+async def test_total_calories_daily_rollup_rejects_ranges_over_fourteen_days(client) -> None:
+    """Total-calorie aggregation cannot exceed Google's documented 14-day span."""
+    with pytest.raises(ValueError, match="14 days"):
+        await client.async_daily_rollup_data_points(
+            "total-calories",
+            start=RAW_START,
+            end=RAW_START + timedelta(days=15),
+            source_family="all-sources",
+        )
+
+
 async def test_daily_rollup_rejects_an_unsupported_operation(client) -> None:
     """Daily rollups fail before an API request when metadata does not allow them."""
     with pytest.raises(ValueError, match="does not support daily rollup"):
@@ -752,3 +1088,31 @@ async def test_daily_rollup_transient_failures_hide_response_content(
         )
 
     assert "sensitive response content" not in str(err.value)
+
+
+async def test_daily_rollup_malformed_json_has_no_reachable_raw_response(
+    client, aioclient_mock
+) -> None:
+    """The shared POST wrapper discards malformed health-response exceptions."""
+    private_health_value = "private-rollup-health-value"
+    private_response = f'{{"rollupDataPoints":[{{"value":"{private_health_value}"}}]'
+    aioclient_mock.post(
+        DAILY_ROLLUP_ACTIVE_ZONE_MINUTES_URL,
+        text=private_response,
+        headers={"Content-Type": "application/json"},
+    )
+
+    with pytest.raises(UpdateFailed) as raised:
+        await client.async_daily_rollup_data_points(
+            "active-zone-minutes",
+            start=RAW_START,
+            end=RAW_END,
+            source_family="all-sources",
+        )
+
+    assert str(raised.value) == "Google Health returned an invalid response"
+    _assert_sanitized_update_failure(
+        raised.value,
+        private_health_value,
+        private_response,
+    )

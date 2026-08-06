@@ -12,7 +12,16 @@ from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import UpdateFailed as CoordinatorUpdateFailed
 
 from custom_components.resiyhome_health_sync.api import AuthenticationError, UpdateFailed
-from custom_components.resiyhome_health_sync.const import SCAN_INTERVAL
+from custom_components.resiyhome_health_sync.capabilities import (
+    CapabilityId,
+    validate_granted_scopes,
+)
+from custom_components.resiyhome_health_sync.const import (
+    BASE_SCOPES,
+    NUTRITION_SCOPE,
+    SCAN_INTERVAL,
+    SETTINGS_SCOPE,
+)
 from custom_components.resiyhome_health_sync.coordinator import (
     OPTIONAL_PROBE_DATA_TYPES,
     HealthSyncCoordinator,
@@ -87,6 +96,121 @@ def _weight(day: date, grams: float, *, hour: int = 8) -> dict:
             },
             "weightGrams": grams,
         }
+    }
+
+
+def _body_fat(day: date, percentage: float, *, hour: int = 8) -> dict:
+    measured_at = datetime(day.year, day.month, day.day, hour, tzinfo=UTC)
+    return {
+        "bodyFat": {
+            "sampleTime": {
+                "physicalTime": measured_at.isoformat().replace("+00:00", "Z"),
+                "utcOffset": "0s",
+            },
+            "percentage": percentage,
+        }
+    }
+
+
+def _height(day: date, millimeters: float, *, hour: int = 8) -> dict:
+    measured_at = datetime(day.year, day.month, day.day, hour, tzinfo=UTC)
+    return {
+        "height": {
+            "sampleTime": {
+                "physicalTime": measured_at.isoformat().replace("+00:00", "Z"),
+                "utcOffset": "0s",
+            },
+            "heightMillimeters": millimeters,
+        }
+    }
+
+
+def _nutrition(day: date, kcal: object, *, hour: int = 8) -> dict:
+    start = datetime(day.year, day.month, day.day, hour, tzinfo=UTC)
+    end = start + timedelta(minutes=30)
+    return {
+        "dataPointName": (
+            "users/private/dataTypes/nutrition-log/dataPoints/"
+            f"reconciled-nutrition-{hour}"
+        ),
+        "nutritionLog": {
+            "interval": {
+                "startTime": start.isoformat().replace("+00:00", "Z"),
+                "startUtcOffset": "0s",
+                "endTime": end.isoformat().replace("+00:00", "Z"),
+                "endUtcOffset": "0s",
+                "civilStartTime": {
+                    "date": {"year": day.year, "month": day.month, "day": day.day},
+                    "time": {"hours": hour},
+                },
+                "civilEndTime": {
+                    "date": {"year": day.year, "month": day.month, "day": day.day},
+                    "time": {"hours": hour, "minutes": 30},
+                },
+            },
+            "energy": {"kcal": kcal},
+        },
+    }
+
+
+def _hydration(day: date, milliliters: object, *, hour: int = 8) -> dict:
+    start = datetime(day.year, day.month, day.day, hour, tzinfo=UTC)
+    end = start + timedelta(minutes=30)
+    return {
+        "dataPointName": (
+            "users/private/dataTypes/hydration-log/dataPoints/"
+            f"reconciled-hydration-{hour}"
+        ),
+        "hydrationLog": {
+            "interval": {
+                "startTime": start.isoformat().replace("+00:00", "Z"),
+                "startUtcOffset": "0s",
+                "endTime": end.isoformat().replace("+00:00", "Z"),
+                "endUtcOffset": "0s",
+                "civilStartTime": {
+                    "date": {"year": day.year, "month": day.month, "day": day.day},
+                    "time": {"hours": hour},
+                },
+                "civilEndTime": {
+                    "date": {"year": day.year, "month": day.month, "day": day.day},
+                    "time": {"hours": hour, "minutes": 30},
+                },
+            },
+            "amountConsumed": {"milliliters": milliliters},
+        },
+    }
+
+
+def _adversarial_raw_nutrition(point: dict) -> dict:
+    point.pop("dataPointName")
+    point["name"] = "users/private/dataTypes/nutrition-log/dataPoints/private-record"
+    point["dataSource"] = {"name": "users/private/dataSources/private-source"}
+    point["nutritionLog"]["foodDisplayName"] = "Private meal"
+    point["nutritionLog"]["nutrients"] = [
+        {"nutrient": "PROTEIN", "quantity": {"grams": 20.0}}
+    ]
+    return point
+
+
+def _adversarial_raw_hydration(point: dict) -> dict:
+    point.pop("dataPointName")
+    point["name"] = "users/private/dataTypes/hydration-log/dataPoints/private-record"
+    point["dataSource"] = {"name": "users/private/dataSources/private-source"}
+    return point
+
+
+def _paired_device(**overrides: object) -> dict[str, object]:
+    return {
+        "name": "users/me/pairedDevices/private-device-123",
+        "deviceType": "TRACKER",
+        "batteryStatus": "High",
+        "batteryLevel": 84,
+        "lastSyncTime": "2042-07-13T12:30:00Z",
+        "deviceVersion": "Fitbit Charge 7",
+        "macAddress": "AA:BB:CC:DD:EE:FF",
+        "features": ["HEART_RATE", "GPS"],
+        "serialNumber": "private-serial",
+        **overrides,
     }
 
 
@@ -182,7 +306,11 @@ class FakeClient:
         self.rollups: dict[str, list[dict]] = {}
         self.failures: dict[tuple[str, str], Exception] = {}
         self.calls: list[tuple[str, str, datetime | None, datetime | None]] = []
+        self.paired_devices: list[dict[str, object]] = []
+        self.paired_device_failure: Exception | None = None
+        self.paired_device_calls = 0
         self.backfill_gate: asyncio.Event | None = None
+        self.scope_grant = validate_granted_scopes(BASE_SCOPES, {})
 
     async def async_list_data_points(
         self, data_type: str, *, start: datetime, end: datetime
@@ -226,6 +354,12 @@ class FakeClient:
         if failure is not None:
             raise failure
         return self.rollups.get(data_type, [])
+
+    async def async_list_paired_devices(self) -> list[dict[str, object]]:
+        self.paired_device_calls += 1
+        if self.paired_device_failure is not None:
+            raise self.paired_device_failure
+        return self.paired_devices
 
     @property
     def current_step_calls(self) -> int:
@@ -294,7 +428,12 @@ class FakeStore:
             self.rows = {
                 day: replace(
                     summary,
-                    expanded=replace(summary.expanded, weight_kg=None),
+                    expanded=replace(
+                        summary.expanded,
+                        weight_kg=None,
+                        body_fat_percentage=None,
+                        height_m=None,
+                    ),
                 )
                 for day, summary in self.rows.items()
             }
@@ -416,6 +555,523 @@ async def test_successful_refresh_updates_history_and_last_success(
     assert snapshot.authorization_healthy is True
 
 
+async def test_total_calories_and_sleep_period_current_refresh_use_existing_sleep_request(
+    hass, client: FakeClient, store: FakeStore, now: datetime
+) -> None:
+    """Current refresh merges total calories and detailed timing without another sleep call."""
+    client.rollups["total-calories"] = [
+        _daily_rollup(now.date(), "totalCalories", kcalSum=0.0)
+    ]
+    sleep = _sleep(
+        start=now.replace(hour=4),
+        start_offset_seconds=0,
+        end=now.replace(hour=11),
+        end_offset_seconds=0,
+    )
+    sleep["sleep"]["summary"].update(
+        {
+            "minutesAsleep": "375",
+            "minutesInSleepPeriod": "402",
+            "minutesToFallAsleep": "6",
+            "minutesAfterWakeUp": "12",
+        }
+    )
+    client.all_sources["sleep"] = [sleep]
+    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+
+    snapshot = await coordinator.async_manual_refresh()
+
+    assert snapshot.current_day.total_energy_kcal == 0.0
+    assert snapshot.current_day.sleep_minutes == 375.0
+    assert snapshot.current_day.sleep_period_minutes == 402.0
+    assert snapshot.current_day.sleep_onset_minutes == 6.0
+    assert snapshot.current_day.sleep_after_wake_minutes == 12.0
+    assert [
+        (family, data_type)
+        for family, data_type, _start, _end in client.calls
+        if data_type == "sleep"
+    ] == [("raw", "sleep"), ("all-sources", "sleep")]
+
+
+async def test_nutrition_refresh_uses_only_the_current_local_civil_day(
+    hass, client: FakeClient
+) -> None:
+    """An available nutrition capability reconciles exactly one local day."""
+    detroit = ZoneInfo("America/Detroit")
+    now = datetime(2042, 7, 13, 15, 0, tzinfo=detroit)
+    client.scope_grant = validate_granted_scopes(
+        (*BASE_SCOPES, NUTRITION_SCOPE),
+        {"include_nutrition": True},
+    )
+    client.all_sources["nutrition-log"] = [
+        _adversarial_raw_nutrition(_nutrition(now.date(), 820.0)),
+        _nutrition(now.date(), 1000.0, hour=13),
+    ]
+    client.all_sources["hydration-log"] = [
+        _adversarial_raw_hydration(_hydration(now.date(), 900.0)),
+        _hydration(now.date(), 1200.0, hour=13),
+    ]
+    store = FakeStore()
+    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+
+    snapshot = await coordinator.async_manual_refresh()
+
+    assert snapshot.current_day.nutrition_energy_kcal == 1820.0
+    assert snapshot.current_day.hydration_ml == 2100.0
+    assert [
+        (family, data_type, start, end)
+        for family, data_type, start, end in client.calls
+        if data_type in {"nutrition-log", "hydration-log"}
+    ] == [
+        (
+            "all-sources",
+            "nutrition-log",
+            datetime(2042, 7, 13, tzinfo=detroit),
+            datetime(2042, 7, 14, tzinfo=detroit),
+        ),
+        (
+            "all-sources",
+            "hydration-log",
+            datetime(2042, 7, 13, tzinfo=detroit),
+            datetime(2042, 7, 14, tzinfo=detroit),
+        ),
+    ]
+    nutrition_state = snapshot.capability_states[CapabilityId.NUTRITION]
+    assert nutrition_state.enabled is True
+    assert nutrition_state.scope_granted is True
+    assert nutrition_state.last_success == now
+    assert nutrition_state.error_category is None
+    retained = repr((snapshot, store.rows[now.date()]))
+    assert "Private meal" not in retained
+    assert "PROTEIN" not in retained
+    assert "private-source" not in retained
+    assert "private-record" not in retained
+    assert "reconciled-nutrition-13" not in retained
+    assert "reconciled-hydration-13" not in retained
+
+
+@pytest.mark.parametrize(
+    ("scopes", "options", "enabled", "scope_granted"),
+    [
+        ((*BASE_SCOPES, NUTRITION_SCOPE), {}, False, True),
+        (BASE_SCOPES, {"include_nutrition": True}, True, False),
+    ],
+)
+async def test_nutrition_refresh_requires_enabled_option_and_granted_scope(
+    hass,
+    client: FakeClient,
+    now: datetime,
+    scopes: tuple[str, ...],
+    options: dict[str, bool],
+    enabled: bool,
+    scope_granted: bool,
+) -> None:
+    """Option and permission gates are independent and schedule no partial request."""
+    client.scope_grant = validate_granted_scopes(scopes, options)
+    coordinator = HealthSyncCoordinator(hass, client, FakeStore(), now=lambda: now)
+
+    snapshot = await coordinator.async_manual_refresh()
+
+    assert snapshot.current_day.nutrition_energy_kcal is None
+    assert snapshot.current_day.hydration_ml is None
+    assert not any(
+        data_type in {"nutrition-log", "hydration-log"}
+        for _family, data_type, _start, _end in client.calls
+    )
+    state = snapshot.capability_states[CapabilityId.NUTRITION]
+    assert state.enabled is enabled
+    assert state.scope_granted is scope_granted
+    assert state.last_success is None
+    assert state.error_category == ("authorization" if enabled else None)
+    assert snapshot.authorization_healthy is True
+
+
+async def test_nutrition_capability_never_runs_during_historical_backfill(
+    hass, client: FakeClient, now: datetime
+) -> None:
+    """Enabling nutrition adds no core or expanded backfill data type."""
+    client.scope_grant = validate_granted_scopes(
+        (*BASE_SCOPES, NUTRITION_SCOPE),
+        {"include_nutrition": True},
+    )
+    store = FakeStore(cursor=now.date(), expanded_cursor=now.date())
+    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+
+    await coordinator.async_backfill_step()
+
+    assert not any(
+        data_type in {"nutrition-log", "hydration-log"}
+        for _family, data_type, _start, _end in client.calls
+    )
+    assert store.backfill_cursor == now.date() - timedelta(days=7)
+    assert store.expanded_backfill_cursor == now.date() - timedelta(days=14)
+
+
+@pytest.mark.parametrize(
+    ("failed_type", "message"),
+    [
+        ("nutrition-log", "Google Health rejected the data request with 403"),
+        ("hydration-log", "Google Health request timed out"),
+    ],
+)
+async def test_nutrition_request_failure_preserves_values_and_baseline_health(
+    hass,
+    client: FakeClient,
+    now: datetime,
+    failed_type: str,
+    message: str,
+) -> None:
+    """A nutrition-only 403 or timeout cannot change baseline groups or either cursor."""
+    core_cursor = now.date() - timedelta(days=21)
+    expanded_cursor = now.date() - timedelta(days=14)
+    previous = DailySummary(
+        date=now.date(),
+        steps=6000,
+        fitbit_steps=5800,
+        distance_m=4500.0,
+        nutrition_energy_kcal=1750.0,
+        hydration_ml=1950.0,
+        source=SourceKind.FITBIT,
+        updated_at=now - timedelta(minutes=15),
+    )
+    store = FakeStore(
+        [previous],
+        cursor=core_cursor,
+        expanded_cursor=expanded_cursor,
+    )
+    client.scope_grant = validate_granted_scopes(
+        (*BASE_SCOPES, NUTRITION_SCOPE),
+        {"include_nutrition": True},
+    )
+    client.all_sources["nutrition-log"] = [_nutrition(now.date(), 1820.0)]
+    client.all_sources["hydration-log"] = [_hydration(now.date(), 2100.0)]
+    client.failures[("all-sources", failed_type)] = UpdateFailed(message)
+    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+
+    snapshot = await coordinator.async_manual_refresh()
+
+    assert snapshot.current_day.nutrition_energy_kcal == 1750.0
+    assert snapshot.current_day.hydration_ml == 1950.0
+    assert snapshot.current_day.steps == 6000
+    assert snapshot.current_day.fitbit_steps == 5800
+    assert snapshot.current_day.distance_m == 4500.0
+    assert snapshot.current_day.source is SourceKind.FITBIT
+    assert snapshot.authorization_healthy is True
+    assert snapshot.last_success == now
+    assert snapshot.backfill_cursor == core_cursor
+    assert snapshot.expanded_backfill_cursor == expanded_cursor
+    state = snapshot.capability_states[CapabilityId.NUTRITION]
+    assert state.enabled is True
+    assert state.scope_granted is True
+    assert state.last_success is None
+    assert state.error_category == "temporary"
+    assert store.rows[now.date()] == snapshot.current_day
+
+
+async def test_paired_device_refresh_normalizes_current_metadata_without_history_storage(
+    hass, client: FakeClient, now: datetime
+) -> None:
+    """An enabled settings capability stores only sanitized current runtime metadata."""
+    client.scope_grant = validate_granted_scopes(
+        (*BASE_SCOPES, SETTINGS_SCOPE),
+        {"include_paired_devices": True},
+    )
+    client.paired_devices = [_paired_device()]
+    store = FakeStore(
+        cursor=now.date() - timedelta(days=21),
+        expanded_cursor=now.date() - timedelta(days=14),
+    )
+    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+
+    snapshot = await coordinator.async_manual_refresh()
+
+    assert client.paired_device_calls == 1
+    assert len(snapshot.paired_devices) == 1
+    device = snapshot.paired_devices[0]
+    assert device.identity_digest == "577fa4f7736cb1d1aa4fb6e3b8c9ca28"
+    assert device.device_type == "TRACKER"
+    assert device.product_name == "Fitbit Charge 7"
+    assert device.battery_status == "High"
+    assert device.battery_percentage == 84
+    assert device.last_sync == datetime(2042, 7, 13, 12, 30, tzinfo=UTC)
+    state = snapshot.capability_states[CapabilityId.PAIRED_DEVICES]
+    assert state.enabled is True
+    assert state.scope_granted is True
+    assert state.last_success == now
+    assert state.error_category is None
+    assert snapshot.authorization_healthy is True
+
+    snapshot_values = repr(snapshot)
+    for private_value in (
+        "users/me/pairedDevices/private-device-123",
+        "AA:BB:CC:DD:EE:FF",
+        "HEART_RATE",
+        "GPS",
+        "private-serial",
+    ):
+        assert private_value not in snapshot_values
+    persisted_history = repr(store.rows)
+    assert device.identity_digest not in persisted_history
+    assert "Fitbit Charge 7" not in persisted_history
+
+
+@pytest.mark.parametrize(
+    ("scopes", "options", "enabled", "scope_granted"),
+    [
+        ((*BASE_SCOPES, SETTINGS_SCOPE), {}, False, True),
+        (BASE_SCOPES, {"include_paired_devices": True}, True, False),
+    ],
+)
+async def test_paired_device_refresh_requires_option_and_settings_scope(
+    hass,
+    client: FakeClient,
+    now: datetime,
+    scopes: tuple[str, ...],
+    options: dict[str, bool],
+    enabled: bool,
+    scope_granted: bool,
+) -> None:
+    """Partial consent never schedules a settings request or harms baseline health."""
+    client.scope_grant = validate_granted_scopes(scopes, options)
+    client.paired_devices = [_paired_device()]
+    coordinator = HealthSyncCoordinator(hass, client, FakeStore(), now=lambda: now)
+
+    snapshot = await coordinator.async_manual_refresh()
+
+    assert client.paired_device_calls == 0
+    assert snapshot.paired_devices == ()
+    state = snapshot.capability_states[CapabilityId.PAIRED_DEVICES]
+    assert state.enabled is enabled
+    assert state.scope_granted is scope_granted
+    assert state.last_success is None
+    assert state.error_category == ("authorization" if enabled else None)
+    assert snapshot.authorization_healthy is True
+
+
+@pytest.mark.parametrize(
+    ("failure", "replacement"),
+    [
+        (UpdateFailed("Google Health rejected the data request with 403"), None),
+        (UpdateFailed("Google Health request timed out"), None),
+        (None, _paired_device(batteryLevel=101)),
+        (None, _paired_device(lastSyncTime="0001-01-01T00:00:00+14:00")),
+    ],
+)
+async def test_paired_device_failure_preserves_tuple_and_only_marks_its_capability(
+    hass,
+    client: FakeClient,
+    now: datetime,
+    failure: Exception | None,
+    replacement: dict[str, object] | None,
+) -> None:
+    """Settings failures cannot discard prior devices or poison baseline health."""
+    clock = [now]
+    core_cursor = now.date() - timedelta(days=21)
+    expanded_cursor = now.date() - timedelta(days=14)
+    client.scope_grant = validate_granted_scopes(
+        (*BASE_SCOPES, SETTINGS_SCOPE),
+        {"include_paired_devices": True},
+    )
+    client.paired_devices = [_paired_device()]
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        FakeStore(cursor=core_cursor, expanded_cursor=expanded_cursor),
+        now=lambda: clock[0],
+    )
+    first = await coordinator.async_refresh_current()
+    previous_devices = first.paired_devices
+    other_states = {
+        capability: state
+        for capability, state in first.capability_states.items()
+        if capability is not CapabilityId.PAIRED_DEVICES
+    }
+
+    clock[0] += timedelta(minutes=15)
+    client.paired_device_failure = failure
+    if replacement is not None:
+        client.paired_devices = [replacement]
+
+    snapshot = await coordinator.async_refresh_current()
+
+    assert client.paired_device_calls == 2
+    assert snapshot.paired_devices == previous_devices
+    assert snapshot.authorization_healthy is True
+    assert snapshot.last_success == clock[0]
+    assert snapshot.backfill_cursor == core_cursor
+    assert snapshot.expanded_backfill_cursor == expanded_cursor
+    assert snapshot.current_day.steps == 6000
+    assert snapshot.current_day.fitbit_steps == 5800
+    assert snapshot.current_day.distance_m == 4500.0
+    assert snapshot.current_day.source is SourceKind.FITBIT
+    state = snapshot.capability_states[CapabilityId.PAIRED_DEVICES]
+    assert state.enabled is True
+    assert state.scope_granted is True
+    assert state.last_success == now
+    assert state.error_category == "temporary"
+    assert {
+        capability: capability_state
+        for capability, capability_state in snapshot.capability_states.items()
+        if capability is not CapabilityId.PAIRED_DEVICES
+    } == other_states
+    assert "with 403" not in repr(snapshot)
+    assert "timed out" not in repr(snapshot)
+
+
+async def test_disabling_paired_devices_clears_ephemeral_metadata(
+    hass, client: FakeClient, now: datetime
+) -> None:
+    """Removing the opt-in stops requests and removes the current runtime tuple."""
+    client.scope_grant = validate_granted_scopes(
+        (*BASE_SCOPES, SETTINGS_SCOPE),
+        {"include_paired_devices": True},
+    )
+    client.paired_devices = [_paired_device()]
+    coordinator = HealthSyncCoordinator(hass, client, FakeStore(), now=lambda: now)
+    await coordinator.async_refresh_current()
+
+    client.scope_grant = validate_granted_scopes(BASE_SCOPES, {})
+    snapshot = await coordinator.async_refresh_current()
+
+    assert client.paired_device_calls == 1
+    assert snapshot.paired_devices == ()
+    state = snapshot.capability_states[CapabilityId.PAIRED_DEVICES]
+    assert state.enabled is False
+    assert state.scope_granted is False
+    assert state.error_category is None
+    assert snapshot.authorization_healthy is True
+
+
+async def test_paired_devices_are_never_requested_during_backfill(
+    hass, client: FakeClient, now: datetime
+) -> None:
+    """Current device metadata cannot enter either persisted history lifecycle."""
+    client.scope_grant = validate_granted_scopes(
+        (*BASE_SCOPES, SETTINGS_SCOPE),
+        {"include_paired_devices": True},
+    )
+    client.paired_devices = [_paired_device()]
+    store = FakeStore(cursor=now.date(), expanded_cursor=now.date())
+    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+
+    await coordinator.async_backfill_step()
+
+    assert client.paired_device_calls == 0
+    assert coordinator.data.paired_devices == ()
+    assert "Fitbit Charge 7" not in repr(store.rows)
+
+
+async def test_total_calories_and_sleep_period_are_normalized_during_backfill(
+    hass, client: FakeClient, now: datetime
+) -> None:
+    """Core history writes total calories and detailed sleep timing for returned days."""
+    historical_day = now.date() - timedelta(days=1)
+    client.rollups["total-calories"] = [
+        _daily_rollup(historical_day, "totalCalories", kcalSum=2345.6)
+    ]
+    sleep = _sleep(
+        start=datetime.combine(
+            historical_day - timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=UTC,
+        ).replace(hour=23),
+        start_offset_seconds=0,
+        end=datetime.combine(historical_day, datetime.min.time(), tzinfo=UTC).replace(hour=7),
+        end_offset_seconds=0,
+    )
+    sleep["sleep"]["summary"].update(
+        {
+            "minutesAsleep": "375",
+            "minutesInSleepPeriod": "402",
+            "minutesToFallAsleep": "6",
+            "minutesAfterWakeUp": "12",
+        }
+    )
+    client.all_sources["sleep"] = [sleep]
+    store = FakeStore(cursor=now.date())
+    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+
+    await coordinator.async_backfill_step()
+
+    row = store.rows[historical_day]
+    assert row.total_energy_kcal == 2345.6
+    assert row.sleep_minutes == 375.0
+    assert row.sleep_period_minutes == 402.0
+    assert row.sleep_onset_minutes == 6.0
+    assert row.sleep_after_wake_minutes == 12.0
+
+
+async def test_total_calories_date_only_rollups_are_partitioned_during_backfill(
+    hass, client: FakeClient, now: datetime
+) -> None:
+    """Date-only rollup boundaries retain the value for each historical day."""
+    historical_day = now.date() - timedelta(days=1)
+    older_day = historical_day - timedelta(days=1)
+    rollups = [
+        _daily_rollup(older_day, "totalCalories", kcalSum=2100.0),
+        _daily_rollup(historical_day, "totalCalories", kcalSum=2200.0),
+    ]
+    for rollup in rollups:
+        rollup["civilStartTime"].pop("time")
+        rollup["civilEndTime"].pop("time")
+    client.rollups["total-calories"] = rollups
+    store = FakeStore(cursor=now.date())
+    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+
+    await coordinator.async_backfill_step()
+
+    assert store.rows[older_day].total_energy_kcal == 2100.0
+    assert store.rows[historical_day].total_energy_kcal == 2200.0
+
+
+async def test_undated_total_calories_do_not_repeat_across_backfill_days(
+    hass, client: FakeClient, now: datetime
+) -> None:
+    """A sole undated rollup cannot be reused for every returned historical day."""
+    historical_day = now.date() - timedelta(days=1)
+    older_day = historical_day - timedelta(days=1)
+    client.all_sources["steps"] = [
+        _steps(older_day, 4100),
+        _steps(historical_day, 4200),
+    ]
+    client.rollups["total-calories"] = [{"totalCalories": {"kcalSum": 2300.0}}]
+    store = FakeStore(cursor=now.date())
+    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+
+    await coordinator.async_backfill_step()
+
+    assert store.rows[older_day].steps == 4100
+    assert store.rows[historical_day].steps == 4200
+    assert store.rows[older_day].total_energy_kcal is None
+    assert store.rows[historical_day].total_energy_kcal is None
+
+
+async def test_total_calories_failure_preserves_prior_activity_values(
+    hass, client: FakeClient, now: datetime
+) -> None:
+    """A temporary total-calorie failure preserves its activity group only."""
+    previous = DailySummary(
+        date=now.date(),
+        steps=4500,
+        active_energy_kcal=120.0,
+        total_energy_kcal=2200.0,
+    )
+    client.all_sources["active-energy-burned"] = [
+        _interval_point(now.date(), "activeEnergyBurned", "kcal", 145.0)
+    ]
+    client.failures[("daily-rollup-all-sources", "total-calories")] = UpdateFailed(
+        "total calories unavailable"
+    )
+    store = FakeStore([previous])
+    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+
+    snapshot = await coordinator.async_manual_refresh()
+
+    assert snapshot.current_day.active_energy_kcal == 120.0
+    assert snapshot.current_day.total_energy_kcal == 2200.0
+    assert snapshot.current_day.steps == 6000
+
+
 async def test_successful_manual_refresh_notifies_coordinator_listeners(coordinator) -> None:
     updates = 0
 
@@ -532,6 +1188,7 @@ async def test_current_refresh_uses_reconciled_records_with_daily_rollup_precede
         "daily-heart-rate-zones",
     )
     expected_rollups = (
+        "total-calories",
         "active-zone-minutes",
         "floors",
         "sedentary-period",
@@ -555,7 +1212,7 @@ async def test_current_refresh_uses_reconciled_records_with_daily_rollup_precede
     actual_calls = Counter((family, data_type) for family, data_type, _, _ in client.calls)
 
     assert actual_calls == expected_calls
-    assert len(client.calls) == 35
+    assert len(client.calls) == 36
     assert all(end - start == timedelta(days=1) for _, _, start, end in client.calls)
     assert not any(
         data_type == "oxygen-saturation"
@@ -625,10 +1282,12 @@ async def test_failed_expanded_type_does_not_inherit_from_a_different_current_da
     assert snapshot.current_day.expanded.vo2_max is None
 
 
-async def test_weight_is_not_requested_without_body_measurement_opt_in(
+async def test_body_measurements_are_not_requested_without_opt_in(
     hass, client: FakeClient, store: FakeStore, now: datetime
 ) -> None:
     client.all_sources["weight"] = [_weight(now.date(), 80_500.0)]
+    client.all_sources["body-fat"] = [_body_fat(now.date(), 21.4)]
+    client.all_sources["height"] = [_height(now.date(), 1778.0)]
     coordinator = HealthSyncCoordinator(
         hass,
         client,
@@ -639,10 +1298,273 @@ async def test_weight_is_not_requested_without_body_measurement_opt_in(
 
     snapshot = await coordinator.async_manual_refresh()
 
-    assert not any(data_type == "weight" for _, data_type, _, _ in client.calls)
+    assert not any(
+        data_type in {"weight", "body-fat", "height"}
+        for _, data_type, _, _ in client.calls
+    )
     assert snapshot.current_day.expanded.weight_kg is None
+    assert snapshot.current_day.expanded.body_fat_percentage is None
+    assert snapshot.current_day.expanded.height_m is None
     assert snapshot.latest_weight_kg is None
     assert snapshot.latest_weight_at is None
+    assert snapshot.latest_body_fat_percentage is None
+    assert snapshot.latest_body_fat_at is None
+    assert snapshot.latest_height_m is None
+    assert snapshot.latest_height_at is None
+
+
+async def test_disabling_body_measurements_scrubs_and_prevents_resurrection(
+    hass, client: FakeClient, store: FakeStore, now: datetime
+) -> None:
+    client.all_sources["weight"] = [_weight(now.date(), 80_500.0)]
+    client.all_sources["body-fat"] = [_body_fat(now.date(), 21.4)]
+    client.all_sources["height"] = [_height(now.date(), 1778.0)]
+    enabled = HealthSyncCoordinator(
+        hass,
+        client,
+        store,
+        now=lambda: now,
+        include_body_measurements=True,
+    )
+
+    collected = await enabled.async_manual_refresh()
+
+    assert collected.current_day.expanded.weight_kg == 80.5
+    assert collected.current_day.expanded.body_fat_percentage == 21.4
+    assert collected.current_day.expanded.height_m == 1.778
+    assert collected.latest_body_fat_percentage == 21.4
+    assert collected.latest_body_fat_at == now.date()
+    assert collected.latest_height_m == 1.778
+    assert collected.latest_height_at == now.date()
+
+    client.calls.clear()
+    disabled = HealthSyncCoordinator(
+        hass,
+        client,
+        store,
+        now=lambda: now,
+        include_body_measurements=False,
+    )
+
+    after_disable = await disabled.async_manual_refresh()
+
+    assert not any(
+        data_type in {"weight", "body-fat", "height"}
+        for _, data_type, _, _ in client.calls
+    )
+    assert after_disable.current_day.expanded.weight_kg is None
+    assert after_disable.current_day.expanded.body_fat_percentage is None
+    assert after_disable.current_day.expanded.height_m is None
+    assert after_disable.latest_weight_kg is None
+    assert after_disable.latest_weight_at is None
+    assert after_disable.latest_body_fat_percentage is None
+    assert after_disable.latest_body_fat_at is None
+    assert after_disable.latest_height_m is None
+    assert after_disable.latest_height_at is None
+    persisted = store.rows[now.date()]
+    assert persisted.expanded.weight_kg is None
+    assert persisted.expanded.body_fat_percentage is None
+    assert persisted.expanded.height_m is None
+    assert persisted.steps == 6000
+
+    after_next_refresh = await disabled.async_refresh_current()
+
+    assert after_next_refresh.current_day.expanded.weight_kg is None
+    assert after_next_refresh.current_day.expanded.body_fat_percentage is None
+    assert after_next_refresh.current_day.expanded.height_m is None
+    assert after_next_refresh.latest_body_fat_percentage is None
+    assert after_next_refresh.latest_body_fat_at is None
+    assert after_next_refresh.latest_height_m is None
+    assert after_next_refresh.latest_height_at is None
+
+
+async def test_body_measurements_are_requested_and_surfaced_together(
+    hass, client: FakeClient, now: datetime
+) -> None:
+    client.all_sources["weight"] = [
+        _weight(now.date(), 81_000.0, hour=7),
+        _weight(now.date(), 80_500.0, hour=10),
+    ]
+    client.all_sources["body-fat"] = [
+        _body_fat(now.date(), 22.0, hour=8),
+        _body_fat(now.date(), 21.4, hour=11),
+    ]
+    client.all_sources["height"] = [
+        _height(now.date(), 1777.0, hour=9),
+        _height(now.date(), 1778.0, hour=12),
+    ]
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        FakeStore(body_measurements_enabled=True),
+        now=lambda: now,
+        include_body_measurements=True,
+    )
+
+    snapshot = await coordinator.async_manual_refresh()
+
+    requested = {
+        data_type
+        for family, data_type, _, _ in client.calls
+        if family == "all-sources"
+    }
+    assert {"weight", "body-fat", "height"} <= requested
+    assert snapshot.current_day.expanded.weight_kg == 80.5
+    assert snapshot.current_day.expanded.body_fat_percentage == 21.4
+    assert snapshot.current_day.expanded.height_m == 1.778
+    assert snapshot.latest_weight_kg == 80.5
+    assert snapshot.latest_weight_at == now.date()
+    assert snapshot.latest_body_fat_percentage == 21.4
+    assert snapshot.latest_body_fat_at == now.date()
+    assert snapshot.latest_height_m == 1.778
+    assert snapshot.latest_height_at == now.date()
+
+
+async def test_body_measurements_backfill_requests_stay_within_ninety_days(
+    hass, client: FakeClient, now: datetime
+) -> None:
+    boundary = now.date() - timedelta(days=90)
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        FakeStore(cursor=date.min),
+        now=lambda: now,
+        include_body_measurements=True,
+    )
+
+    for _ in range(7):
+        await coordinator.async_backfill_step()
+
+    body_calls = [
+        (data_type, start, end)
+        for family, data_type, start, end in client.calls
+        if family == "all-sources"
+        and data_type in {"weight", "body-fat", "height"}
+    ]
+    assert {data_type for data_type, _, _ in body_calls} == {
+        "weight",
+        "body-fat",
+        "height",
+    }
+    assert all(
+        start.date() >= boundary
+        and end.date() <= now.date()
+        and end - start <= timedelta(days=14)
+        for _, start, end in body_calls
+    )
+    assert coordinator.data.expanded_backfill_cursor == boundary
+    assert coordinator.data.expanded_backfill_complete is True
+
+
+async def test_latest_body_measurements_are_selected_independently_from_history(
+    hass, client: FakeClient, now: datetime
+) -> None:
+    rows = [
+        DailySummary(
+            date=now.date() - timedelta(days=3),
+            expanded=ExpandedDailyMetrics(
+                weight_kg=79.0,
+                body_fat_percentage=22.5,
+                height_m=1.778,
+            ),
+        ),
+        DailySummary(
+            date=now.date() - timedelta(days=2),
+            expanded=ExpandedDailyMetrics(weight_kg=80.0),
+        ),
+        DailySummary(
+            date=now.date() - timedelta(days=1),
+            expanded=ExpandedDailyMetrics(body_fat_percentage=21.5),
+        ),
+    ]
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        FakeStore(rows, body_measurements_enabled=True),
+        now=lambda: now,
+        include_body_measurements=True,
+    )
+
+    snapshot = await coordinator.async_manual_refresh()
+
+    assert snapshot.latest_weight_kg == 80.0
+    assert snapshot.latest_weight_at == now.date() - timedelta(days=2)
+    assert snapshot.latest_body_fat_percentage == 21.5
+    assert snapshot.latest_body_fat_at == now.date() - timedelta(days=1)
+    assert snapshot.latest_height_m == 1.778
+    assert snapshot.latest_height_at == now.date() - timedelta(days=3)
+
+
+@pytest.mark.parametrize(
+    ("failed_type", "failed_value_field", "failed_latest_field", "failed_date_field"),
+    [
+        (
+            "weight",
+            "weight_kg",
+            "latest_weight_kg",
+            "latest_weight_at",
+        ),
+        (
+            "body-fat",
+            "body_fat_percentage",
+            "latest_body_fat_percentage",
+            "latest_body_fat_at",
+        ),
+        (
+            "height",
+            "height_m",
+            "latest_height_m",
+            "latest_height_at",
+        ),
+    ],
+)
+async def test_body_measurements_preserve_only_the_failed_previous_latest_value(
+    hass,
+    client: FakeClient,
+    now: datetime,
+    failed_type: str,
+    failed_value_field: str,
+    failed_latest_field: str,
+    failed_date_field: str,
+) -> None:
+    previous_day = now.date() - timedelta(days=1)
+    previous = DailySummary(
+        date=previous_day,
+        expanded=ExpandedDailyMetrics(
+            weight_kg=79.0,
+            body_fat_percentage=22.5,
+            height_m=1.777,
+        ),
+    )
+    client.all_sources["weight"] = [_weight(now.date(), 80_500.0)]
+    client.all_sources["body-fat"] = [_body_fat(now.date(), 21.4)]
+    client.all_sources["height"] = [_height(now.date(), 1778.0)]
+    client.failures[("all-sources", failed_type)] = UpdateFailed("temporary")
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        FakeStore([previous], body_measurements_enabled=True),
+        now=lambda: now,
+        include_body_measurements=True,
+    )
+
+    snapshot = await coordinator.async_manual_refresh()
+
+    assert getattr(snapshot.current_day.expanded, failed_value_field) is None
+    assert getattr(snapshot, failed_latest_field) == getattr(
+        previous.expanded, failed_value_field
+    )
+    assert getattr(snapshot, failed_date_field) == previous_day
+    for successful_type, value_field, latest_field in (
+        ("weight", "weight_kg", "latest_weight_kg"),
+        ("body-fat", "body_fat_percentage", "latest_body_fat_percentage"),
+        ("height", "height_m", "latest_height_m"),
+    ):
+        if successful_type != failed_type:
+            assert getattr(snapshot.current_day.expanded, value_field) is not None
+            assert getattr(snapshot, latest_field) == getattr(
+                snapshot.current_day.expanded, value_field
+            )
 
 
 @pytest.mark.parametrize(
@@ -1011,13 +1933,14 @@ async def test_optional_probe_logs_only_counts_and_source_labels(
         "status": "ok",
     }
     assert result["daily-vo2-max"]["all_sources_count"] == 1
-    assert "Optional data type availability probe:" in caplog.text
+    message_text = "\n".join(caplog.messages)
+    assert "Optional data type availability probe:" in message_text
     assert "active-zone-minutes status=ok raw=1 all_sources=1 wearables=1 platforms=FITBIT" in (
-        caplog.text
+        message_text
     )
-    assert "secret" not in caplog.text
-    assert "23" not in caplog.text
-    assert "42" not in caplog.text
+    assert "secret" not in message_text
+    assert "23" not in message_text
+    assert "42" not in message_text
     assert (
         "all-sources",
         "active-zone-minutes",

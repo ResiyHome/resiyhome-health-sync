@@ -77,6 +77,7 @@ def _runtime_patches(summary: DailySummary | None = None):
     history.backfill_cursor = date(2042, 7, 1)
     history.async_load = AsyncMock(return_value=[])
     history.async_query = AsyncMock(return_value=[])
+    history.async_shutdown = AsyncMock()
     coordinator = MagicMock()
     coordinator.data = CoordinatorSnapshot(
         current_day=summary or _summary(),
