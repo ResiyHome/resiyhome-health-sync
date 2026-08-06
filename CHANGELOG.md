@@ -34,6 +34,8 @@ All notable public changes to Health Sync by ResiyHome are recorded here.
 - Extended normalized history with total calories, sleep timing, body fat,
   height, and current-day nutrition fields. Paired-device metadata remains
   current only and is excluded from normalized history.
+- Moved automatic redacted refresh diagnostics from warning to debug logging.
+  The explicitly requested optional-data availability probe now logs at info.
 
 ### Privacy
 

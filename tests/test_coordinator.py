@@ -1824,7 +1824,7 @@ async def test_detroit_dst_sleep_uses_local_end_day(
 async def test_missing_current_sleep_logs_redacted_diagnostics(
     hass, caplog, client: FakeClient, store: FakeStore, now: datetime
 ) -> None:
-    caplog.set_level(logging.WARNING, logger="custom_components.resiyhome_health_sync.coordinator")
+    caplog.set_level(logging.DEBUG, logger="custom_components.resiyhome_health_sync.coordinator")
     coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
 
     snapshot = await coordinator.async_manual_refresh()
@@ -1837,13 +1837,18 @@ async def test_missing_current_sleep_logs_redacted_diagnostics(
     assert "access_token" not in caplog.text
     assert "refresh_token" not in caplog.text
     assert "data_points" not in caplog.text
+    assert next(
+        record
+        for record in caplog.records
+        if "Sleep diagnostics for current refresh" in record.getMessage()
+    ).levelno == logging.DEBUG
 
 
 async def test_missing_current_source_records_log_redacted_fetch_diagnostics(
     hass, caplog, store: FakeStore, now: datetime
 ) -> None:
     """Current refresh logs source family counts without raw health payloads."""
-    caplog.set_level(logging.WARNING, logger="custom_components.resiyhome_health_sync.coordinator")
+    caplog.set_level(logging.DEBUG, logger="custom_components.resiyhome_health_sync.coordinator")
     client = FakeClient()
     client.all_sources = {"steps": [_steps(now.date(), 1700)]}
     client.raw = {
@@ -1873,13 +1878,18 @@ async def test_missing_current_source_records_log_redacted_fetch_diagnostics(
     assert "1700" not in caplog.text
     assert "access_token" not in caplog.text
     assert "refresh_token" not in caplog.text
+    assert next(
+        record
+        for record in caplog.records
+        if "Fetch diagnostics for current refresh" in record.getMessage()
+    ).levelno == logging.DEBUG
 
 
 async def test_missing_expanded_rollups_log_only_redacted_shape_diagnostics(
     hass, caplog, client: FakeClient, store: FakeStore, now: datetime
 ) -> None:
     """Expanded diagnostics expose counts and availability, never health values."""
-    caplog.set_level(logging.WARNING, logger="custom_components.resiyhome_health_sync.coordinator")
+    caplog.set_level(logging.DEBUG, logger="custom_components.resiyhome_health_sync.coordinator")
     client.all_sources["active-zone-minutes"] = [
         {
             "activeZoneMinutes": {
@@ -1902,13 +1912,18 @@ async def test_missing_expanded_rollups_log_only_redacted_shape_diagnostics(
     assert "direct_counts=(active-zone-minutes=1" in caplog.text
     assert "rollup_counts=(active-zone-minutes=0" in caplog.text
     assert "private_health_value" not in caplog.text
+    assert next(
+        record
+        for record in caplog.records
+        if "Expanded diagnostics for current refresh" in record.getMessage()
+    ).levelno == logging.DEBUG
 
 
 async def test_optional_probe_logs_only_counts_and_source_labels(
     hass, caplog, store: FakeStore, now: datetime
 ) -> None:
     """Optional metric probing checks availability without exposing health values."""
-    caplog.set_level(logging.WARNING, logger="custom_components.resiyhome_health_sync.coordinator")
+    caplog.set_level(logging.INFO, logger="custom_components.resiyhome_health_sync.coordinator")
     client = FakeClient()
     client.raw = {
         "active-zone-minutes": [{"dataSource": {"platform": "FITBIT"}, "secret": "value"}],
@@ -1941,6 +1956,11 @@ async def test_optional_probe_logs_only_counts_and_source_labels(
     assert "secret" not in message_text
     assert "23" not in message_text
     assert "42" not in message_text
+    assert next(
+        record
+        for record in caplog.records
+        if "Optional data type availability probe" in record.getMessage()
+    ).levelno == logging.INFO
     assert (
         "all-sources",
         "active-zone-minutes",
@@ -2005,7 +2025,7 @@ async def test_optional_probe_rejects_unsafe_ranges(
 async def test_invalid_current_sleep_logs_only_counts_and_availability(
     hass, caplog, client: FakeClient, store: FakeStore, now: datetime
 ) -> None:
-    caplog.set_level(logging.WARNING, logger="custom_components.resiyhome_health_sync.coordinator")
+    caplog.set_level(logging.DEBUG, logger="custom_components.resiyhome_health_sync.coordinator")
     point = _sleep(
         start=now.replace(hour=4),
         start_offset_seconds=0,
@@ -2030,7 +2050,7 @@ async def test_invalid_current_sleep_logs_only_counts_and_availability(
 async def test_missing_sleep_stages_logs_counts_without_stage_shapes(
     hass, caplog, client: FakeClient, store: FakeStore, now: datetime
 ) -> None:
-    caplog.set_level(logging.WARNING, logger="custom_components.resiyhome_health_sync.coordinator")
+    caplog.set_level(logging.DEBUG, logger="custom_components.resiyhome_health_sync.coordinator")
     point = _sleep(
         start=now.replace(hour=4),
         start_offset_seconds=0,
@@ -2058,7 +2078,7 @@ async def test_missing_sleep_stages_logs_counts_without_stage_shapes(
 async def test_missing_sleep_stages_never_logs_stage_types_or_values(
     hass, caplog, client: FakeClient, store: FakeStore, now: datetime
 ) -> None:
-    caplog.set_level(logging.WARNING, logger="custom_components.resiyhome_health_sync.coordinator")
+    caplog.set_level(logging.DEBUG, logger="custom_components.resiyhome_health_sync.coordinator")
     point = _sleep(
         start=now.replace(hour=4),
         start_offset_seconds=0,

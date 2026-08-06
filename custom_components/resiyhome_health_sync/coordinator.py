@@ -805,7 +805,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         if signature == self._last_sleep_diagnostic:
             return
         self._last_sleep_diagnostic = signature
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Sleep diagnostics for current refresh: "
             "reason=%s day=%s window_start=%s window_end=%s raw_count=%d "
             "all_sources_count=%d raw_summary_count=%d all_sources_summary_count=%d "
@@ -859,7 +859,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         if signature == self._last_fetch_diagnostic:
             return
         self._last_fetch_diagnostic = signature
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Fetch diagnostics for current refresh: "
             "day=%s window_start=%s window_end=%s successful_types=%s "
             "raw_counts=%s all_sources_counts=%s wearables_counts=%s raw_platforms=%s "
@@ -906,7 +906,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         if signature == self._last_expanded_diagnostic:
             return
         self._last_expanded_diagnostic = signature
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Expanded diagnostics for current refresh: "
             "day=%s successful_types=%s direct_counts=%s rollup_counts=%s availability=%s",
             day.isoformat(),
@@ -1254,7 +1254,7 @@ def _log_optional_probe(results: Mapping[str, Mapping[str, object]]) -> None:
             f"all_sources={result['all_sources_count']} "
             f"wearables={result['wearables_count']} platforms={platform_label}"
         )
-    _LOGGER.warning("Optional data type availability probe: %s", "; ".join(summaries))
+    _LOGGER.info("Optional data type availability probe: %s", "; ".join(summaries))
 
 
 def _format_sequence(values: tuple[str, ...]) -> str:
