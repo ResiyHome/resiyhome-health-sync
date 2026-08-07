@@ -125,6 +125,12 @@ entities and every new last-workout entity use this same selected object.
 Crossing midnight therefore does not make the last workout unavailable merely
 because no new workout occurred today.
 
+Also add snapshot-level latest standard and running VO2 values, methods, and
+timestamps. Rebuild them from the newest valid per-day samples across loaded
+normalized history and the current refresh. The latest VO2 entities use these
+snapshot fields so a day without a new sample does not clear the prior valid
+measurement.
+
 ### Sleep efficiency
 
 Add `sleep_efficiency_percentage: float | None` to `DailySummary`.
