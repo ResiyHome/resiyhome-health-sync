@@ -1,26 +1,38 @@
 """Read-only OAuth and Google Health API transport."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from aiohttp import ClientError, ClientSession
 
-from .const import HEALTH_API_BASE_URL, SCOPES, TOKEN_URL
+from .capabilities import (
+    CAPABILITIES,
+    ScopeGrant,
+    UnsupportedScopeError,
+    validate_granted_scopes,
+)
+from .const import HEALTH_API_BASE_URL, TOKEN_URL
 
 REQUEST_TIMEOUT_SECONDS = 30
 DEFAULT_PAGE_SIZE = 10000
 SESSION_PAGE_SIZE = 25
+PAIRED_DEVICE_PAGE_SIZE = 100
+MAX_PAIRED_DEVICE_PAGES = 20
 # Local safety bounds in addition to Google's documented per-request page sizes.
 MAX_PAGINATION_PAGES = 100
 MAX_PAGINATION_RESULTS = 1_000_000
 
-type DataTypeOperation = Literal["list", "reconcile", "rollup", "daily_rollup"]
+type DataTypeOperation = Literal["list", "get", "reconcile", "rollup", "daily_rollup"]
 _LIST_RECONCILE = frozenset({"list", "reconcile"})
+_LIST_GET_RECONCILE = frozenset({"list", "get", "reconcile"})
 _LIST_RECONCILE_ROLLUPS = frozenset(
     {"list", "reconcile", "rollup", "daily_rollup"}
+)
+_LIST_GET_RECONCILE_ROLLUPS = frozenset(
+    {"list", "get", "reconcile", "rollup", "daily_rollup"}
 )
 
 
@@ -89,7 +101,12 @@ _DATA_TYPE_SPECS: dict[str, _DataTypeSpec] = {
     "height": _DataTypeSpec(
         "height.sample_time.physical_time",
         "physical",
-        operations=_LIST_RECONCILE_ROLLUPS,
+        operations=_LIST_GET_RECONCILE,
+    ),
+    "hydration-log": _DataTypeSpec(
+        "hydration_log.interval.civil_start_time",
+        "civil",
+        operations=_LIST_GET_RECONCILE_ROLLUPS,
     ),
     "oxygen-saturation": _DataTypeSpec(
         "oxygen_saturation.sample_time.physical_time", "physical"
@@ -115,6 +132,16 @@ _DATA_TYPE_SPECS: dict[str, _DataTypeSpec] = {
         "time_in_heart_rate_zone.interval.start_time",
         "physical",
         operations=_LIST_RECONCILE_ROLLUPS,
+    ),
+    "total-calories": _DataTypeSpec(
+        "total_calories.interval.civil_start_time",
+        "civil",
+        operations=frozenset({"rollup", "daily_rollup"}),
+    ),
+    "nutrition-log": _DataTypeSpec(
+        "nutrition_log.interval.civil_start_time",
+        "civil",
+        operations=_LIST_GET_RECONCILE_ROLLUPS,
     ),
     "vo2-max": _DataTypeSpec("vo2_max.sample_time.physical_time", "physical"),
     "weight": _DataTypeSpec(
@@ -165,6 +192,7 @@ class GoogleHealthClient:
         client_secret: str,
         redirect_uri: str,
         token_state: OAuthTokenState,
+        scope_grant: ScopeGrant,
         token_update_callback: TokenUpdateCallback,
     ) -> None:
         """Initialize the client with coordinator-owned credentials."""
@@ -173,7 +201,18 @@ class GoogleHealthClient:
         self._client_secret = client_secret
         self._redirect_uri = redirect_uri
         self._token_state = token_state
+        self._scope_grant = scope_grant
+        self._capability_options = {
+            spec.option_key: capability_id in scope_grant.enabled_capabilities
+            for capability_id, spec in CAPABILITIES.items()
+            if spec.option_key is not None
+        }
         self._token_update_callback = token_update_callback
+
+    @property
+    def scope_grant(self) -> ScopeGrant:
+        """Return the current capability grant after any token refresh."""
+        return self._scope_grant
 
     async def async_exchange_code(self, authorization_code: str) -> OAuthTokenState:
         """Exchange a one-time authorization code for fully scoped credentials."""
@@ -221,6 +260,15 @@ class GoogleHealthClient:
             },
         )
 
+    async def async_list_paired_devices(self) -> list[Mapping[str, object]]:
+        """List paired devices through Google's bounded read-only collection."""
+        return await self._async_paginated_get(
+            "users/me/pairedDevices",
+            {"pageSize": PAIRED_DEVICE_PAGE_SIZE},
+            response_key="pairedDevices",
+            max_pages=MAX_PAIRED_DEVICE_PAGES,
+        )
+
     async def async_reconcile_data_points(
         self,
         data_type: str,
@@ -242,6 +290,16 @@ class GoogleHealthClient:
             f"users/me/dataTypes/{data_type}/dataPoints:reconcile", params
         )
 
+    async def async_reconcile_all_height_data_points(self) -> list[dict[str, Any]]:
+        """Read sparse height history without expanding daily metric backfill."""
+        return await self._async_paginated_get(
+            "users/me/dataTypes/height/dataPoints:reconcile",
+            {
+                "pageSize": _DATA_TYPE_SPECS["height"].page_size,
+                "dataSourceFamily": "users/me/dataSourceFamilies/all-sources",
+            },
+        )
+
     async def async_daily_rollup_data_points(
         self,
         data_type: str,
@@ -257,10 +315,11 @@ class GoogleHealthClient:
                 f"Google Health data type {data_type} does not support daily rollup"
             )
         _validate_daily_rollup_range(data_type, start, end)
+        requested_days = (end.date() - start.date()).days
         body: dict[str, object] = {
             "range": {"start": _civil_date(start), "end": _civil_date(end)},
             "windowSizeDays": 1,
-            "pageSize": spec.page_size,
+            "pageSize": min(spec.page_size, requested_days),
             "dataSourceFamily": f"users/me/dataSourceFamilies/{source_family}",
         }
         return await self._async_paginated_post(
@@ -277,6 +336,7 @@ class GoogleHealthClient:
         existing_scopes: frozenset[str],
     ) -> OAuthTokenState:
         """Request and validate a token response without exposing its contents."""
+        failure_message: str | None = None
         try:
             async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                 async with self._session.post(
@@ -289,10 +349,13 @@ class GoogleHealthClient:
                     if response.status >= 400:
                         raise AuthenticationError("Google OAuth rejected the credentials")
                     payload = await response.json()
-        except (ClientError, TimeoutError) as err:
-            raise UpdateFailed("Google OAuth request failed") from err
-        except (TypeError, ValueError) as err:
-            raise UpdateFailed("Google OAuth returned an invalid response") from err
+        except (ClientError, TimeoutError):
+            failure_message = "Google OAuth request failed"
+        except (TypeError, ValueError):
+            failure_message = "Google OAuth returned an invalid response"
+
+        if failure_message is not None:
+            raise UpdateFailed(failure_message)
 
         if not isinstance(payload, dict):
             raise UpdateFailed("Google OAuth returned an invalid response")
@@ -301,11 +364,15 @@ class GoogleHealthClient:
 
     async def _async_persist_token_state(self, state: OAuthTokenState) -> None:
         """Persist first so a failed write cannot replace the working token state."""
+        persistence_failed = False
         try:
             await self._token_update_callback(state)
-        except Exception as err:
-            raise UpdateFailed("Unable to persist Google OAuth credentials") from err
+        except Exception:
+            persistence_failed = True
+        if persistence_failed:
+            raise UpdateFailed("Unable to persist Google OAuth credentials")
         self._token_state = state
+        self._scope_grant = self._validate_granted_scopes(state.scopes)
 
     def _parse_token_state(
         self,
@@ -334,8 +401,7 @@ class GoogleHealthClient:
         else:
             raise MissingRequiredScopeError("Google OAuth returned an invalid scope response")
 
-        if granted_scopes != frozenset(SCOPES):
-            raise MissingRequiredScopeError("Google OAuth did not grant every required read scope")
+        self._validate_granted_scopes(granted_scopes)
 
         return OAuthTokenState(
             access_token=access_token,
@@ -344,8 +410,27 @@ class GoogleHealthClient:
             scopes=granted_scopes,
         )
 
+    def _validate_granted_scopes(self, granted_scopes: frozenset[str]) -> ScopeGrant:
+        """Validate supported scopes while allowing declined optional permissions."""
+        try:
+            grant = validate_granted_scopes(granted_scopes, self._capability_options)
+        except UnsupportedScopeError as err:
+            raise MissingRequiredScopeError(
+                "Google OAuth returned an unsupported scope"
+            ) from err
+        if not grant.baseline_valid:
+            raise MissingRequiredScopeError(
+                "Google OAuth did not grant every required baseline read scope"
+            )
+        return grant
+
     async def _async_paginated_get(
-        self, path: str, params: dict[str, str | int]
+        self,
+        path: str,
+        params: dict[str, str | int],
+        *,
+        response_key: str = "dataPoints",
+        max_pages: int | None = None,
     ) -> list[dict[str, Any]]:
         """Collect every page from a read-only Google Health collection."""
         async def fetch_page(page_token: str | None) -> dict[str, Any]:
@@ -356,7 +441,11 @@ class GoogleHealthClient:
                 f"{HEALTH_API_BASE_URL}/{path}", page_params
             )
 
-        return await self._async_collect_paginated(fetch_page, "dataPoints")
+        return await self._async_collect_paginated(
+            fetch_page,
+            response_key,
+            max_pages=max_pages,
+        )
 
     async def _async_paginated_post(
         self, path: str, body: dict[str, object], *, response_key: str
@@ -376,13 +465,16 @@ class GoogleHealthClient:
         self,
         fetch_page: Callable[[str | None], Awaitable[dict[str, Any]]],
         response_key: str,
+        *,
+        max_pages: int | None = None,
     ) -> list[dict[str, Any]]:
         """Collect a bounded paginated response without exposing token or result values."""
         data_points: list[dict[str, Any]] = []
         page_token: str | None = None
         seen_tokens: set[str] = set()
+        page_limit = MAX_PAGINATION_PAGES if max_pages is None else max_pages
 
-        for _page_number in range(MAX_PAGINATION_PAGES):
+        for _page_number in range(page_limit):
             payload = await fetch_page(page_token)
             page_data_points = payload.get(response_key, [])
             if not isinstance(page_data_points, list) or not all(
@@ -412,6 +504,7 @@ class GoogleHealthClient:
     async def _async_get_json(self, url: str, params: dict[str, str | int]) -> dict[str, Any]:
         """Make one GET request, refreshing credentials once after a 401."""
         for has_refreshed in (False, True):
+            failure_message: str | None = None
             try:
                 async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                     async with self._session.get(
@@ -436,10 +529,13 @@ class GoogleHealthClient:
                             if not isinstance(payload, dict):
                                 raise UpdateFailed("Google Health returned an invalid response")
                             return payload
-            except (ClientError, TimeoutError) as err:
-                raise UpdateFailed("Google Health request failed") from err
-            except (TypeError, ValueError) as err:
-                raise UpdateFailed("Google Health returned an invalid response") from err
+            except (ClientError, TimeoutError):
+                failure_message = "Google Health request failed"
+            except (TypeError, ValueError):
+                failure_message = "Google Health returned an invalid response"
+
+            if failure_message is not None:
+                raise UpdateFailed(failure_message)
 
             await self.async_refresh_access_token()
 
@@ -448,6 +544,7 @@ class GoogleHealthClient:
     async def _async_post_json(self, url: str, body: dict[str, object]) -> dict[str, Any]:
         """Make one POST request, refreshing credentials once after a 401."""
         for has_refreshed in (False, True):
+            failure_message: str | None = None
             try:
                 async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                     async with self._session.post(
@@ -472,10 +569,13 @@ class GoogleHealthClient:
                             if not isinstance(payload, dict):
                                 raise UpdateFailed("Google Health returned an invalid response")
                             return payload
-            except (ClientError, TimeoutError) as err:
-                raise UpdateFailed("Google Health request failed") from err
-            except (TypeError, ValueError) as err:
-                raise UpdateFailed("Google Health returned an invalid response") from err
+            except (ClientError, TimeoutError):
+                failure_message = "Google Health request failed"
+            except (TypeError, ValueError):
+                failure_message = "Google Health returned an invalid response"
+
+            if failure_message is not None:
+                raise UpdateFailed(failure_message)
 
             await self.async_refresh_access_token()
 
@@ -540,7 +640,11 @@ def _validate_daily_rollup_range(data_type: str, start: datetime, end: datetime)
     if end <= start:
         raise ValueError("end must be after start")
 
-    maximum_days = 14 if data_type == "calories-in-heart-rate-zone" else 90
+    maximum_days = (
+        14
+        if data_type in {"calories-in-heart-rate-zone", "total-calories"}
+        else 90
+    )
     if (end.date() - start.date()).days > maximum_days:
         raise ValueError(f"daily rollup range cannot exceed {maximum_days} days")
 

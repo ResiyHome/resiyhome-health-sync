@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import date, datetime
@@ -9,11 +10,12 @@ from math import isfinite
 from pathlib import Path
 from typing import cast
 
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, Event, HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .models import DailySummary, ExpandedDailyMetrics, SourceKind, WorkoutSummary
 
+_LOGGER = logging.getLogger(__name__)
 _STORE_VERSION = 1
 _STORE_MINOR_VERSION = 1
 _SCHEMA_VERSION = 3
@@ -35,8 +37,14 @@ _SUMMARY_FIELDS = frozenset(
         "fitbit_steps",
         "distance_m",
         "active_energy_kcal",
+        "total_energy_kcal",
+        "nutrition_energy_kcal",
+        "hydration_ml",
         "exercise_minutes",
         "sleep_minutes",
+        "sleep_period_minutes",
+        "sleep_onset_minutes",
+        "sleep_after_wake_minutes",
         "sleep_stages",
         "resting_heart_rate",
         "average_heart_rate",
@@ -48,6 +56,16 @@ _SUMMARY_FIELDS = frozenset(
         "source",
         "complete",
         "updated_at",
+    }
+)
+_SUMMARY_ADDITIVE_FIELDS = frozenset(
+    {
+        "total_energy_kcal",
+        "nutrition_energy_kcal",
+        "hydration_ml",
+        "sleep_period_minutes",
+        "sleep_onset_minutes",
+        "sleep_after_wake_minutes",
     }
 )
 _EXPANDED_FIELDS = frozenset(
@@ -70,8 +88,11 @@ _EXPANDED_FIELDS = frozenset(
         "heart_zone_thresholds",
         "heart_zone_calories",
         "weight_kg",
+        "body_fat_percentage",
+        "height_m",
     }
 )
+_EXPANDED_ADDITIVE_FIELDS = frozenset({"body_fat_percentage", "height_m"})
 _WORKOUT_FIELDS = frozenset(
     {"activity_type", "duration_minutes", "start", "end", "active_energy_kcal"}
 )
@@ -90,6 +111,75 @@ class HistoryStoreError(ValueError):
 
 class _HistoryStore(Store[dict[str, object]]):
     """Store writer with a fail-closed, direct history reader."""
+
+    async def async_save_confirmed(self, data: dict[str, object]) -> None:
+        """Save through Store and confirm the requested document reached disk."""
+        await self.async_save(data)
+        if self._data is not None:
+            await self._async_handle_write_data()
+        persisted = await self.hass.async_add_executor_job(
+            self._read_persisted_store_payload
+        )
+        if persisted != data:
+            raise HistoryStoreError("health history write was not persisted")
+
+    async def async_drain_pending_write_confirmed(self) -> None:
+        """Drain one pending write, restoring its callbacks unless disk confirms it."""
+        async with self._write_lock:
+            if self._data is None:
+                return
+            pending = self._data
+            if "data_func" in pending:
+                pending_payload = cast(dict[str, object], pending["data_func"]())
+            else:
+                pending_payload = cast(dict[str, object], pending["data"])
+            prepared = {
+                "version": self.version,
+                "minor_version": self.minor_version,
+                "key": self.key,
+                "data": pending_payload,
+            }
+
+            self._manager.async_invalidate(self.key)
+            self._async_cleanup_delay_listener()
+            self._async_cleanup_final_write_listener()
+            self._data = None
+            try:
+                await self._async_write_data(prepared)
+                persisted = await self.hass.async_add_executor_job(
+                    self._read_persisted_store_payload
+                )
+                if persisted != pending_payload:
+                    raise HistoryStoreError("health history write was not persisted")
+            except BaseException:
+                if self._data is None:
+                    # Restore before releasing the write lock so shutdown cannot
+                    # observe an empty queue after an unconfirmed callback write.
+                    snapshot = pending_payload
+                    self.async_delay_save(
+                        lambda: snapshot,
+                        _SAVE_DELAY_SECONDS,
+                    )
+                raise
+
+    async def _async_callback_delayed_write(self) -> None:
+        """Run a delayed write through the confirmed history path."""
+        if self.hass.state is CoreState.stopping:
+            self._async_ensure_final_write_listener()
+            return
+        await self._async_retry_pending_write()
+
+    async def _async_callback_final_write(self, _event: Event) -> None:
+        """Run the final write through the confirmed history path."""
+        self._unsub_final_write_listener = None
+        await self._async_retry_pending_write()
+
+    async def _async_retry_pending_write(self) -> None:
+        """Retain and log a delayed or final write that disk did not confirm."""
+        try:
+            await self.async_drain_pending_write_confirmed()
+        except Exception as err:
+            _LOGGER.error("Unable to persist pending history for %s: %s", self.key, err)
 
     async def async_load_validated_history(
         self,
@@ -146,6 +236,16 @@ class _HistoryStore(Store[dict[str, object]]):
             )
         return summaries, cursor, expanded_cursor, body_enabled, inner_migration
 
+    def _read_persisted_store_payload(self) -> Mapping[str, object] | None:
+        """Read only the validated inner document for write confirmation."""
+        outer_document = _read_store_document(Path(self.path))
+        if outer_document is None:
+            return None
+        _stored_version, payload = _deserialize_store_wrapper(
+            outer_document, self.key, self.version, self.minor_version
+        )
+        return payload
+
     def async_discard_pending_write(self) -> None:
         """Cancel every queued write without letting stale data survive a failed load."""
         self._async_cleanup_delay_listener()
@@ -174,6 +274,7 @@ class HealthHistoryStore:
         self._body_measurements_enabled = False
         self._loaded = False
         self._load_failed = False
+        self._closed = False
         self._lock = asyncio.Lock()
 
     @property
@@ -194,7 +295,16 @@ class HealthHistoryStore:
     async def async_load(self) -> list[DailySummary]:
         """Load the validated history document without replacing corrupt content."""
         async with self._lock:
+            self._raise_if_closed()
             return await self._async_load_locked()
+
+    async def async_shutdown(self) -> None:
+        """Close this instance and drain its pending delayed write."""
+        async with self._lock:
+            if self._closed:
+                return
+            await self._store.async_drain_pending_write_confirmed()
+            self._closed = True
 
     async def async_load_payload(self, payload: object) -> dict[date, DailySummary]:
         """Decode a stored payload for migration and persistence contract tests."""
@@ -259,17 +369,21 @@ class HealthHistoryStore:
     async def async_apply_body_measurement_option(
         self, enabled: bool, today: date
     ) -> list[DailySummary]:
-        """Durably reset weight backfill or scrub weight on an option transition."""
+        """Durably reset body backfill or scrub body data on an option transition."""
         if type(enabled) is not bool:
             raise TypeError("enabled must be a boolean")
         _require_date(today, "today")
         async with self._lock:
             await self._async_ensure_loaded_locked()
-            has_weight = any(
+            has_body_measurements = any(
                 summary.expanded.weight_kg is not None
+                or summary.expanded.body_fat_percentage is not None
+                or summary.expanded.height_m is not None
                 for summary in self._summaries.values()
             )
-            if enabled == self._body_measurements_enabled and (enabled or not has_weight):
+            if enabled == self._body_measurements_enabled and (
+                enabled or not has_body_measurements
+            ):
                 return self._ordered_summaries()
 
             updated_summaries = self._summaries
@@ -280,7 +394,12 @@ class HealthHistoryStore:
                 updated_summaries = {
                     day: replace(
                         summary,
-                        expanded=replace(summary.expanded, weight_kg=None),
+                        expanded=replace(
+                            summary.expanded,
+                            weight_kg=None,
+                            body_fat_percentage=None,
+                            height_m=None,
+                        ),
                     )
                     for day, summary in self._summaries.items()
                 }
@@ -291,7 +410,7 @@ class HealthHistoryStore:
                 enabled,
             )
             try:
-                await self._store.async_save(document)
+                await self._store.async_save_confirmed(document)
             except Exception as err:
                 raise HistoryStoreError(
                     "unable to persist body measurement option"
@@ -333,12 +452,17 @@ class HealthHistoryStore:
         return self._ordered_summaries()
 
     async def _async_ensure_loaded_locked(self) -> None:
+        self._raise_if_closed()
         if self._load_failed:
             raise HistoryStoreError(
                 "history is unavailable after a failed load; reload after repair"
             )
         if not self._loaded:
             await self._async_load_locked()
+
+    def _raise_if_closed(self) -> None:
+        if self._closed:
+            raise HistoryStoreError("history store is shut down")
 
     def _invalidate_after_load_failure(self) -> None:
         self._store.async_discard_pending_write()
@@ -545,10 +669,14 @@ def _migrate_v1_document(document: Mapping[str, object]) -> dict[str, object]:
     migrated_summaries: dict[str, object] = {}
     for day, summary in _require_mapping(document["summaries"], "summaries").items():
         v1_summary = _require_mapping(summary, "v1 summary")
-        _require_exact_fields(v1_summary, _SUMMARY_FIELDS - {"expanded"}, "v1 summary")
+        _require_exact_fields(
+            v1_summary,
+            _SUMMARY_FIELDS - _SUMMARY_ADDITIVE_FIELDS - {"expanded"},
+            "v1 summary",
+        )
         migrated_summaries[str(day)] = {
             **v1_summary,
-            "expanded": _empty_expanded_payload(),
+            "expanded": _empty_v2_expanded_payload(),
         }
     return {
         "schema_version": 2,
@@ -565,6 +693,19 @@ def _migrate_v2_document(document: Mapping[str, object]) -> dict[str, object]:
         _DOCUMENT_FIELDS - {"body_measurements_enabled"},
         "v2 history",
     )
+    for summary in _require_mapping(document["summaries"], "summaries").values():
+        v2_summary = _require_mapping(summary, "v2 summary")
+        _require_exact_fields(
+            v2_summary,
+            _SUMMARY_FIELDS - _SUMMARY_ADDITIVE_FIELDS,
+            "v2 summary",
+        )
+        v2_expanded = _require_mapping(v2_summary["expanded"], "v2 expanded")
+        _require_exact_fields(
+            v2_expanded,
+            _EXPANDED_FIELDS - _EXPANDED_ADDITIVE_FIELDS,
+            "v2 expanded",
+        )
     return {
         **document,
         "schema_version": _SCHEMA_VERSION,
@@ -589,8 +730,24 @@ def _serialize_summary(summary: DailySummary) -> dict[str, object]:
         "active_energy_kcal": _serialize_optional_float(
             summary.active_energy_kcal, "active_energy_kcal"
         ),
+        "total_energy_kcal": _serialize_optional_float(
+            summary.total_energy_kcal, "total_energy_kcal"
+        ),
+        "nutrition_energy_kcal": _serialize_optional_float(
+            summary.nutrition_energy_kcal, "nutrition_energy_kcal"
+        ),
+        "hydration_ml": _serialize_optional_float(summary.hydration_ml, "hydration_ml"),
         "exercise_minutes": _serialize_optional_float(summary.exercise_minutes, "exercise_minutes"),
         "sleep_minutes": _serialize_optional_float(summary.sleep_minutes, "sleep_minutes"),
+        "sleep_period_minutes": _serialize_optional_float(
+            summary.sleep_period_minutes, "sleep_period_minutes"
+        ),
+        "sleep_onset_minutes": _serialize_optional_float(
+            summary.sleep_onset_minutes, "sleep_onset_minutes"
+        ),
+        "sleep_after_wake_minutes": _serialize_optional_float(
+            summary.sleep_after_wake_minutes, "sleep_after_wake_minutes"
+        ),
         "sleep_stages": _serialize_sleep_stages(summary.sleep_stages),
         "resting_heart_rate": _serialize_optional_float(
             summary.resting_heart_rate, "resting_heart_rate"
@@ -615,7 +772,9 @@ def _serialize_summary(summary: DailySummary) -> dict[str, object]:
 
 def _deserialize_summary(payload: object, expected_day: date) -> DailySummary:
     summary = _require_mapping(payload, "summary")
-    _require_exact_fields(summary, _SUMMARY_FIELDS, "summary")
+    _require_additive_fields(
+        summary, _SUMMARY_FIELDS, _SUMMARY_ADDITIVE_FIELDS, "summary"
+    )
     day = _parse_date(summary["date"], "summary date")
     if day != expected_day:
         raise HistoryStoreError("summary date does not match its date key")
@@ -637,8 +796,24 @@ def _deserialize_summary(payload: object, expected_day: date) -> DailySummary:
         active_energy_kcal=_parse_optional_float(
             summary["active_energy_kcal"], "active_energy_kcal"
         ),
+        total_energy_kcal=_parse_optional_float(
+            summary.get("total_energy_kcal"), "total_energy_kcal"
+        ),
+        nutrition_energy_kcal=_parse_optional_float(
+            summary.get("nutrition_energy_kcal"), "nutrition_energy_kcal"
+        ),
+        hydration_ml=_parse_optional_float(summary.get("hydration_ml"), "hydration_ml"),
         exercise_minutes=_parse_optional_float(summary["exercise_minutes"], "exercise_minutes"),
         sleep_minutes=_parse_optional_float(summary["sleep_minutes"], "sleep_minutes"),
+        sleep_period_minutes=_parse_optional_float(
+            summary.get("sleep_period_minutes"), "sleep_period_minutes"
+        ),
+        sleep_onset_minutes=_parse_optional_float(
+            summary.get("sleep_onset_minutes"), "sleep_onset_minutes"
+        ),
+        sleep_after_wake_minutes=_parse_optional_float(
+            summary.get("sleep_after_wake_minutes"), "sleep_after_wake_minutes"
+        ),
         sleep_stages=_deserialize_sleep_stages(summary["sleep_stages"]),
         resting_heart_rate=_parse_optional_float(
             summary["resting_heart_rate"], "resting_heart_rate"
@@ -661,8 +836,12 @@ def _deserialize_summary(payload: object, expected_day: date) -> DailySummary:
     )
 
 
-def _empty_expanded_payload() -> dict[str, object]:
-    return _serialize_expanded(ExpandedDailyMetrics())
+def _empty_v2_expanded_payload() -> dict[str, object]:
+    return {
+        key: value
+        for key, value in _serialize_expanded(ExpandedDailyMetrics()).items()
+        if key not in _EXPANDED_ADDITIVE_FIELDS
+    }
 
 
 def _serialize_expanded(value: object) -> dict[str, object]:
@@ -715,6 +894,10 @@ def _serialize_expanded(value: object) -> dict[str, object]:
             value.heart_zone_calories, "heart_zone_calories", _HEART_ZONE_TYPES
         ),
         "weight_kg": _serialize_optional_float(value.weight_kg, "weight_kg"),
+        "body_fat_percentage": _serialize_optional_percentage(
+            value.body_fat_percentage, "body_fat_percentage"
+        ),
+        "height_m": _serialize_optional_float(value.height_m, "height_m"),
     }
     _validate_expanded_metric_groups(serialized)
     return serialized
@@ -722,7 +905,9 @@ def _serialize_expanded(value: object) -> dict[str, object]:
 
 def _deserialize_expanded(value: object) -> ExpandedDailyMetrics:
     expanded = _require_mapping(value, "expanded")
-    _require_exact_fields(expanded, _EXPANDED_FIELDS, "expanded")
+    _require_additive_fields(
+        expanded, _EXPANDED_FIELDS, _EXPANDED_ADDITIVE_FIELDS, "expanded"
+    )
     result = ExpandedDailyMetrics(
         active_zone_minutes=_deserialize_zone_values(
             expanded["active_zone_minutes"], "active_zone_minutes", _ACTIVE_ZONE_TYPES
@@ -768,6 +953,10 @@ def _deserialize_expanded(value: object) -> ExpandedDailyMetrics:
             expanded["heart_zone_calories"], "heart_zone_calories", _HEART_ZONE_TYPES
         ),
         weight_kg=_parse_optional_float(expanded["weight_kg"], "weight_kg"),
+        body_fat_percentage=_parse_optional_percentage(
+            expanded.get("body_fat_percentage"), "body_fat_percentage"
+        ),
+        height_m=_parse_optional_float(expanded.get("height_m"), "height_m"),
     )
     _serialize_expanded(result)
     return result
@@ -1061,6 +1250,21 @@ def _require_exact_fields(
     if actual != expected:
         missing = sorted(expected - actual)
         unexpected = sorted(actual - expected)
+        raise HistoryStoreError(
+            f"{field} has invalid fields; missing={missing}, unexpected={unexpected}"
+        )
+
+
+def _require_additive_fields(
+    value: Mapping[str, object],
+    allowed: frozenset[str],
+    optional: frozenset[str],
+    field: str,
+) -> None:
+    actual = set(value)
+    missing = sorted(allowed - optional - actual)
+    unexpected = sorted(actual - allowed)
+    if missing or unexpected:
         raise HistoryStoreError(
             f"{field} has invalid fields; missing={missing}, unexpected={unexpected}"
         )

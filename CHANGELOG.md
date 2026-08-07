@@ -2,6 +2,137 @@
 
 All notable public changes to Health Sync by ResiyHome are recorded here.
 
+## 1.1.0 - 2026-08-06
+
+### Added
+
+- Added Total calories burned today using Google's `total-calories`
+  `dataPoints:dailyRollUp` operation.
+- Added Sleep time in bed, Time to fall asleep, and Time in bed after waking
+  from Google's existing sleep authorization.
+- Expanded optional body measurements with Body-fat percentage and Height
+  alongside Weight. These entities are disabled by default and use the existing
+  health-metrics permission.
+- Added per-person optional nutrition support for Calories consumed today and
+  Water consumed today through `nutrition-log` and `hydration-log`.
+- Added optional paired-device Battery level and Paired-device last Google sync
+  entities for devices returned by Google.
+
+### Fixed
+
+- Corrected the Total calories daily-rollup request so its page count remains
+  within Google's maximum query-duration validation.
+- Added a bounded historical Height lookup for sparse measurements outside the
+  normal 90-day body-history window.
+- Preserved existing entity IDs, configuration entries, normalized history,
+  baseline authorization, and Home Assistant Recorder history during upgrades.
+- Lowered routine automatic refresh diagnostics from warning to debug while
+  keeping the operator-requested availability probe at info.
+- Kept optional capability failures isolated so declining nutrition or paired
+  device access does not stop baseline activity, health, or sleep sensors.
+- Hardened public-release history scanning without allowing unrelated local
+  branches to block a release from the checked-out public branch.
+
+### Privacy
+
+- Nutrition and paired-device support remains read-only and opt-in per person.
+- Health Sync does not retain food names, raw nutrition logs, MAC addresses,
+  raw paired-device resource IDs, device feature lists, OAuth credentials, or
+  raw Google API payloads.
+- Nutrition has no historical backfill. Normalized Calories consumed today and
+  Water consumed today begin with the first successful authorized refresh.
+
+### Upgrade And Nutrition Authorization
+
+1. Install `1.1.0` completely through HACS, then restart Home Assistant once.
+2. Do not delete or re-add any existing Health Sync person.
+3. For each person who wants nutrition sensors, open that existing Health Sync
+   entry, select **Configure**, and enable `include_nutrition`.
+4. Complete **Reauthenticate** for that same entry and same Google account.
+5. On Google's consent screen, approve Google Health nutrition access
+   (`googlehealth.nutrition.readonly`) in addition to the baseline permissions.
+6. Run the Health Sync refresh action or wait for the next 15-minute poll.
+7. Repeat the option and consent steps independently for each household member.
+
+Baseline sensors continue without nutrition reauthorization. If nutrition
+permission is declined, only Calories consumed today and Water consumed today
+remain unavailable.
+
+## 1.1.0-beta.2 - 2026-08-06
+
+### Fixed
+
+- Corrected the Total calories burned today daily-rollup request so its page
+  count remains within Google's maximum query-duration validation.
+- Added a bounded historical Height lookup when no measurement exists in the
+  normal body-history window. This retrieves the latest sparse measurement
+  without extending every body-metric backfill request.
+- Restricted the public-history privacy scanner to commits reachable from the
+  checked-out release branch. Unrelated local branches no longer block a clean
+  release, while the full patch, path, blob, credential, identity, and PNG
+  checks remain active for release history.
+
+### Upgrade And Test
+
+- Install the beta completely through HACS, then restart Home Assistant once.
+- Enable the disabled-by-default Total calories burned today and Height entities
+  if needed, run the Health Sync refresh action, and verify their live Google
+  values before this beta is promoted.
+- Existing entity IDs, normalized history, configuration entries, and OAuth
+  authorization are preserved.
+
+## 1.1.0-beta.1 - 2026-08-06
+
+### Added
+
+- Added Total calories burned today and detailed sleep-timing entities from the
+  existing baseline Google Health authorization.
+- Expanded `include_body_measurements` to Weight, Body-fat percentage, and
+  Height. All three body entities are created disabled by default in the Home
+  Assistant entity registry.
+- Added per-person `include_nutrition` support for Calories consumed today and
+  Water consumed today through the optional
+  `googlehealth.nutrition.readonly` scope. This release starts normalized
+  nutrition with the first successful opt-in refresh and has
+  no historical nutrition backfill.
+- Added per-person `include_paired_devices` support through the optional
+  `googlehealth.settings.readonly` scope. Each current Google paired tracker or
+  scale can expose Battery level and Paired-device last sync entities.
+
+### Changed
+
+- Upgrades preserve existing config entries and baseline-only authorizations. New
+  optional permissions are requested through reauthorization on the same
+  person's entry, and declining one leaves baseline sensors working.
+- Added the eight static person entity keys without changing existing entity
+  identities. Paired battery and sync entities are created dynamically per
+  person and paired-device identity.
+- Clarified that setup accepts a person name and derives the slug used for
+  entity and action identity, while normalized history storage is owned by the
+  Home Assistant config-entry ID.
+- Extended normalized history with total calories, sleep timing, body fat,
+  height, and current-day nutrition fields. Paired-device metadata remains
+  current only and is excluded from normalized history.
+- Moved automatic redacted refresh diagnostics from warning to debug logging.
+  The explicitly requested optional-data availability probe now logs at info.
+
+### Privacy
+
+- Food names, raw nutrition logs, MAC addresses, raw paired-device resource
+  IDs, and device feature lists are excluded from normalized storage and
+  diagnostics.
+- Disabling an optional capability stops future requests. Nutrition values
+  already normalized for prior opt-in days and Home Assistant Recorder states
+  are not automatically erased; removal and purge decisions remain explicit
+  operator actions.
+
+### Upgrade
+
+- Update normally without deleting or re-adding the integration. Baseline
+  sensors require no reauthorization.
+- Enable nutrition or paired devices from each person's options, then complete
+  Google reauthorization for that same person. Repeat per person.
+
 ## 1.0.4 - 2026-07-26
 
 ### Fixed

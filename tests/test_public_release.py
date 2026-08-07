@@ -147,11 +147,11 @@ def _mock_history_commands(run, history: str) -> None:
             "--format=%H%n%B",
             "-m",
             "-p",
-            "--all",
+            "HEAD",
             "--no-ext-diff",
         ]:
             return subprocess.CompletedProcess(command, 0, stdout=history, stderr="")
-        if command == ["git", "rev-list", "--all"]:
+        if command == ["git", "rev-list", "HEAD"]:
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         raise AssertionError(command)
 
@@ -692,6 +692,42 @@ def test_history_scan_excludes_author_email_metadata(tmp_path: Path) -> None:
     scan_history(repository)
 
 
+def test_history_scan_ignores_unrelated_local_branch(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    _initialize_git_repository(repository)
+    (repository / "neutral.txt").write_text("neutral", encoding="utf-8")
+    _commit_all(repository, "add neutral content")
+    release_branch = subprocess.run(
+        ("git", "branch", "--show-current"),
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    subprocess.run(
+        ("git", "switch", "-c", "unrelated-private-work"),
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repository / "private.txt").write_text(
+        HOUSEHOLD_MARKERS[0],
+        encoding="utf-8",
+    )
+    _commit_all(repository, "add unrelated private content")
+    subprocess.run(
+        ("git", "switch", release_branch),
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    scan_history(repository)
+
+
 @pytest.mark.parametrize("key", CREDENTIAL_KEYS)
 def test_history_scan_rejects_multiline_yaml_credential_mapping(
     tmp_path: Path, key: str
@@ -875,7 +911,7 @@ def test_history_scan_rejects_shared_codeowner_blob_at_nonmanifest_merge_path(
     assert manifest_blob == ordinary_blob
 
     patches = subprocess.run(
-        ["git", "log", "--format=%H%n%B", "-m", "-p", "--all", "--no-ext-diff"],
+        ["git", "log", "--format=%H%n%B", "-m", "-p", "HEAD", "--no-ext-diff"],
         cwd=repository,
         check=True,
         capture_output=True,

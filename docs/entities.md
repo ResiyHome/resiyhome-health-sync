@@ -1,8 +1,18 @@
 # Entity Catalog
 
 Each config entry creates one service device for one person. Entity unique IDs combine
-the stable person slug with the runtime key below. Home Assistant may prepend the entry
-name to the generated entity ID.
+the stable person slug derived from the enrolled person name with the runtime
+key below. The setup UI does not ask for a slug. Home Assistant may prepend
+the entry name to the generated entity ID. This slug identifies entities and
+service or action targets within the existing entry; normalized history is
+stored under the Home Assistant config-entry ID instead.
+
+This implementation adds eight static person entity keys:
+`total_calories_burned_today`, `sleep_time_in_bed`,
+`sleep_time_to_fall_asleep`, `sleep_time_after_waking`, `body_fat`, `height`,
+`calories_consumed_today`, and `water_consumed_today`. Paired-device entities
+are dynamic because each authorized Google account can return a different set
+of trackers and scales.
 
 ## Reading the tables
 
@@ -26,8 +36,12 @@ name to the generated entity ID.
 | `fitbit_steps_today` | Fitbit steps today | steps | Enabled | Google-wearables reconciled steps; unavailable when no wearable result |
 | `distance_today` | Distance today | m | Enabled | Reconciled distance converted from millimeters; prior group on partial failure |
 | `active_energy_today` | Active energy today | kcal | Enabled | Reconciled active energy; prior group on partial failure |
+| `total_calories_burned_today` | Total calories burned today | kcal | Enabled | All-source `total-calories` daily rollup; prior activity group on partial failure |
 | `exercise_minutes_today` | Exercise minutes today | min | Enabled | Reconciled active-minute intervals; prior group on partial failure |
 | `last_sleep_duration` | Last sleep duration | min | Enabled | Latest valid reconciled sleep session; unavailable when no valid session |
+| `sleep_time_in_bed` | Sleep time in bed | min | Enabled | `minutesInSleepPeriod` from the same latest valid reconciled sleep session |
+| `sleep_time_to_fall_asleep` | Sleep time to fall asleep | min | Enabled | `minutesToFallAsleep` from the same latest valid reconciled sleep session |
+| `sleep_time_after_waking` | Sleep time after waking | min | Enabled | `minutesAfterWakeUp` from the same latest valid reconciled sleep session |
 | `sleep_awake_duration` | Sleep awake duration | min | Enabled | Awake stage from latest valid reconciled sleep session |
 | `sleep_rem_duration` | Sleep REM duration | min | Enabled | REM stage from latest valid reconciled sleep session |
 | `sleep_light_duration` | Sleep light duration | min | Enabled | Light stage from latest valid reconciled sleep session |
@@ -61,6 +75,23 @@ Expanded groups use no substitute metric when their required response shape is m
 invalid. A partial refresh preserves the prior normalized group; otherwise the entity is
 unavailable.
 
+## Nutrition sensors
+
+These entities are first registered only after `include_nutrition` is enabled
+for the person and Google grants
+`https://www.googleapis.com/auth/googlehealth.nutrition.readonly`.
+
+| Runtime key | Name | Unit | Default | Source and fallback |
+| --- | --- | --- | --- | --- |
+| `calories_consumed_today` | Calories consumed today | kcal | Enabled after opt-in | Sum of current local day's all-source `nutrition-log` energy; prior current-day nutrition group on temporary failure |
+| `water_consumed_today` | Water consumed today | mL | Enabled after opt-in | Sum of current local day's all-source `hydration-log` amount consumed; prior current-day nutrition group on temporary failure |
+
+Nutrition has no historical backfill in this release. Daily normalized
+nutrition begins with the first successful opt-in refresh. Health Sync does
+not infer food intake from calories burned or hydration from another metric.
+If nutrition is later disabled, retained nutrition entities become
+unavailable and no future nutrition requests are made.
+
 ## Detailed sensors disabled by default
 
 | Runtime key | Name | Unit | Default | Source and fallback |
@@ -80,16 +111,44 @@ unavailable.
 | `heart_rate_zone_vigorous_calories_today` | Heart rate zone vigorous calories today | kcal | Disabled | Vigorous-zone all-source daily rollup |
 | `heart_rate_zone_peak_calories_today` | Heart rate zone peak calories today | kcal | Disabled | Peak-zone all-source daily rollup |
 | `weight` | Weight | kg | Disabled | Latest valid reconciled weight sample; no value unless body measurements are opted in |
+| `body_fat` | Body-fat percentage | % | Disabled | Latest valid reconciled `body-fat` percentage; no value unless body measurements are opted in |
+| `height` | Height | m | Disabled | Latest valid reconciled height converted from millimeters; no value unless body measurements are opted in |
 
-The `weight` sensor has two gates: `include_body_measurements` must be enabled for that
-person, and the entity itself must be enabled in Home Assistant.
-Weight is disabled by default in the entity registry.
-After a user enables the entity, it may remain unavailable until body measurements are opted in
-and Google supplies usable weight data. Opt-in permits only weight, triggers a bounded
-90-day normalized weight backfill, and does not enable other body measurements. The
-`measurement_date` attribute identifies the normalized sample date. Opting out removes
-weight from integration history and the current snapshot, but does not purge prior Home
-Assistant recorder states.
+Weight, Body-fat percentage, and Height are created
+disabled by default in the entity registry. Enable each body-measurement entity in the entity registry
+before using it. Every body entity has two gates:
+`include_body_measurements` must be enabled for that person, and the entity
+itself must be enabled in Home Assistant.
+
+After it is enabled, the entity may remain unavailable until body measurements are opted in
+and Google supplies usable data.
+Opt-in starts a bounded 90-day normalized backfill for all three body
+measurements. The `measurement_date` attribute identifies the latest normalized
+sample date. Opting out transactionally removes weight, body-fat, and height
+values from normalized integration history and the current snapshot, but does
+not purge prior Home Assistant Recorder states or backups.
+
+## Dynamic paired-device entities
+
+After `include_paired_devices` is enabled and Google grants
+`https://www.googleapis.com/auth/googlehealth.settings.readonly`, Health Sync
+creates one Home Assistant service device for each returned tracker or scale.
+It creates one battery and one last-sync entity per paired device:
+
+| Dynamic runtime key | Display meaning | Unit or class | Source |
+| --- | --- | --- | --- |
+| `battery_level` | Battery level | % battery | Current v4 `batteryLevel`; `battery_status` attribute from `batteryStatus` |
+| `last_device_sync` | Paired-device last sync | timestamp | Current v4 `lastSyncTime` |
+
+Google's current v4 paired-device contract uses `deviceVersion` for the device
+product/model, `batteryStatus` with `High`, `Medium`, `Low`, or `Empty`,
+integer `batteryLevel`, and RFC 3339 `lastSyncTime`. Health Sync retains only
+those sanitized values, device type, and a one-way identity digest. It does
+not retain the raw Google resource name, MAC address, or feature list.
+
+Paired devices are current metadata only and never enter normalized daily
+history. A temporarily missing device or disabled option leaves an existing
+entity-registry row unavailable instead of creating a new identity later.
 
 ## Activity and synchronization sensors
 
@@ -98,9 +157,16 @@ Assistant recorder states.
 | `last_workout_type` | Last workout type | none | Enabled | Activity type from the latest valid reconciled workout; unavailable if none |
 | `last_workout_duration` | Last workout duration | min | Enabled | Duration from the latest valid reconciled workout; unavailable if none |
 | `current_source` | Current source | none | Enabled | Local enum classification: `fitbit`, `apple_fallback`, `mixed`, or `unavailable` |
-| `last_successful_synchronization` | Last successful synchronization | none | Enabled | Local timestamp of the latest successful current refresh |
+| `last_successful_synchronization` | Last successful synchronization | none | Enabled | Health Sync API refresh time for the latest successful current Google poll |
 | `backfill_status` | Backfill status | none | Enabled | Local enum state: `in_progress` or `complete` |
 | `backfill_cursor` | Backfill cursor | none | Enabled | Local date for the oldest completed core-history boundary; unavailable before a cursor exists |
+
+Health Sync API refresh time and Fitbit mobile-device sync time are different
+clocks. `last_successful_synchronization` reports when Health Sync last
+completed a Google API refresh. A paired device's `last_device_sync` reports
+Google's `lastSyncTime`, which the v4 contract defines as the last sync with
+the Fitbit mobile application. Health Sync does not initiate wearable or
+mobile synchronization.
 
 ## Binary sensors
 

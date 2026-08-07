@@ -10,6 +10,7 @@ import voluptuous as vol
 from homeassistant.components import websocket_api
 from homeassistant.core import HomeAssistant, callback
 
+from .capabilities import CapabilityId
 from .const import DOMAIN
 from .models import DailySummary
 
@@ -36,6 +37,8 @@ _EXPANDED_METRICS = frozenset(
         "heart_zone_thresholds",
         "heart_zone_calories",
         "weight_kg",
+        "body_fat_percentage",
+        "height_m",
     }
 )
 _CORE_METRICS = frozenset(
@@ -51,12 +54,18 @@ _CORE_METRICS = frozenset(
         "minimum_heart_rate",
         "maximum_heart_rate",
         "hrv_ms",
+        "total_energy_kcal",
+        "sleep_period_minutes",
+        "sleep_onset_minutes",
+        "sleep_after_wake_minutes",
         "source",
         "complete",
         "updated_at",
     }
 )
-_METRICS = _CORE_METRICS | _EXPANDED_METRICS
+_BODY_METRICS = frozenset({"weight_kg", "body_fat_percentage", "height_m"})
+_NUTRITION_METRICS = frozenset({"nutrition_energy_kcal", "hydration_ml"})
+_METRICS = _CORE_METRICS | _EXPANDED_METRICS | _NUTRITION_METRICS
 _DEFAULT_METRICS = tuple(sorted(_CORE_METRICS - {"updated_at"}))
 
 
@@ -126,7 +135,13 @@ async def _async_handle_history(hass: HomeAssistant, connection: Any, msg: dict[
         return
 
     rows = await entry.runtime_data.history.async_query(start, end)
-    include_weight = bool(entry.options.get("include_body_measurements", False))
+    include_body_measurements = bool(
+        entry.options.get("include_body_measurements", False)
+    )
+    include_nutrition = (
+        CapabilityId.NUTRITION
+        in entry.runtime_data.scope_grant.available_capabilities
+    )
     connection.send_result(
         msg["id"],
         {
@@ -134,7 +149,13 @@ async def _async_handle_history(hass: HomeAssistant, connection: Any, msg: dict[
             "start_date": start.isoformat(),
             "end_date": end.isoformat(),
             "records": [
-                _serialize_summary(row, metrics, include_weight=include_weight) for row in rows
+                _serialize_summary(
+                    row,
+                    metrics,
+                    include_body_measurements=include_body_measurements,
+                    include_nutrition=include_nutrition,
+                )
+                for row in rows
             ],
         },
     )
@@ -158,7 +179,11 @@ def _parse_date(value: str) -> date | None:
 
 
 def _serialize_summary(
-    summary: DailySummary, metrics: Iterable[str], *, include_weight: bool = False
+    summary: DailySummary,
+    metrics: Iterable[str],
+    *,
+    include_body_measurements: bool = False,
+    include_nutrition: bool = False,
 ) -> dict[str, object]:
     record: dict[str, object] = {"date": summary.date.isoformat()}
     for metric in metrics:
@@ -167,7 +192,9 @@ def _serialize_summary(
             if metric in _EXPANDED_METRICS
             else getattr(summary, metric)
         )
-        if metric == "weight_kg" and not include_weight:
+        if metric in _BODY_METRICS and not include_body_measurements:
+            value = None
+        if metric in _NUTRITION_METRICS and not include_nutrition:
             value = None
         if metric == "source":
             record[metric] = value.value

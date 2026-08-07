@@ -24,7 +24,7 @@
     },
     "step": {
       "reauth_confirm": {
-        "description": "Renew Google Health authorization for {name}.",
+        "description": "Renew Google Health authorization for {name}. Existing entities and history for this person will be reused.",
         "title": "Reauthorize Health Sync by ResiyHome"
       },
       "reconfigure_confirm": {
@@ -44,11 +44,49 @@
     "step": {
       "init": {
         "data": {
-          "include_body_measurements": "Include body measurements"
+          "include_body_measurements": "Include body measurements",
+          "include_nutrition": "Include nutrition",
+          "include_paired_devices": "Include paired devices"
         },
         "data_description": {
-          "include_body_measurements": "Fetch and expose weight for this person. This is disabled by default. Body fat and height are not included."
+          "include_body_measurements": "Fetch weight, body-fat percentage, and height. The entities are disabled by default.",
+          "include_nutrition": "Fetch today's logged food calories and water. Google nutrition permission is required.",
+          "include_paired_devices": "Create battery and last-sync sensors for Google paired devices. Google settings permission is required."
         }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "total_calories_burned_today": {
+        "name": "Total calories burned today"
+      },
+      "sleep_time_in_bed": {
+        "name": "Sleep time in bed"
+      },
+      "sleep_time_to_fall_asleep": {
+        "name": "Sleep time to fall asleep"
+      },
+      "sleep_time_after_waking": {
+        "name": "Sleep time after waking"
+      },
+      "body_fat": {
+        "name": "Body fat"
+      },
+      "height": {
+        "name": "Height"
+      },
+      "calories_consumed_today": {
+        "name": "Calories consumed today"
+      },
+      "water_consumed_today": {
+        "name": "Water consumed today"
+      },
+      "battery_level": {
+        "name": "Battery level"
+      },
+      "last_device_sync": {
+        "name": "Last device sync"
       }
     }
   }

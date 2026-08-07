@@ -7,9 +7,11 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import cast
 
+from .capabilities import CapabilityId
 
-def _empty_mapping[T]() -> Mapping[str, T]:
-    return cast(Mapping[str, T], MappingProxyType({}))
+
+def _empty_mapping[K, V]() -> Mapping[K, V]:
+    return cast(Mapping[K, V], MappingProxyType({}))
 
 
 class SourceKind(StrEnum):
@@ -54,6 +56,8 @@ class ExpandedDailyMetrics:
     heart_zone_thresholds: Mapping[str, tuple[int, int]] = field(default_factory=_empty_mapping)
     heart_zone_calories: Mapping[str, float] = field(default_factory=_empty_mapping)
     weight_kg: float | None = None
+    body_fat_percentage: float | None = None
+    height_m: float | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -88,9 +92,37 @@ class DailySummary:
     source: SourceKind = SourceKind.UNAVAILABLE
     complete: bool = False
     updated_at: datetime | None = None
+    total_energy_kcal: float | None = None
+    nutrition_energy_kcal: float | None = None
+    hydration_ml: float | None = None
+    sleep_period_minutes: float | None = None
+    sleep_onset_minutes: float | None = None
+    sleep_after_wake_minutes: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sleep_stages", MappingProxyType(dict(self.sleep_stages)))
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityRefreshState:
+    """Refresh health for one independently authorized capability."""
+
+    enabled: bool
+    scope_granted: bool
+    last_success: datetime | None = None
+    error_category: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PairedDeviceSummary:
+    """Sanitized normalized state for one paired health device."""
+
+    identity_digest: str
+    device_type: str
+    product_name: str
+    battery_status: str | None
+    battery_percentage: int | None
+    last_sync: datetime | None
 
 
 @dataclass(slots=True)
@@ -107,3 +139,11 @@ class CoordinatorSnapshot:
     expanded_backfill_complete: bool = False
     latest_weight_kg: float | None = None
     latest_weight_at: date | None = None
+    latest_body_fat_percentage: float | None = None
+    latest_body_fat_at: date | None = None
+    latest_height_m: float | None = None
+    latest_height_at: date | None = None
+    paired_devices: tuple[PairedDeviceSummary, ...] = ()
+    capability_states: Mapping[CapabilityId, CapabilityRefreshState] = field(
+        default_factory=_empty_mapping
+    )

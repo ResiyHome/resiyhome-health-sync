@@ -18,7 +18,7 @@ from custom_components.resiyhome_health_sync import (
     async_unload_entry,
     config_flow,
 )
-from custom_components.resiyhome_health_sync.const import DOMAIN, SCOPES
+from custom_components.resiyhome_health_sync.const import DOMAIN, NUTRITION_SCOPE, SCOPES
 from custom_components.resiyhome_health_sync.models import (
     CoordinatorSnapshot,
     DailySummary,
@@ -36,6 +36,8 @@ def _entry(
     person_name: str = "Sample Alpha",
     person_slug: str = "sample_alpha",
     include_body_measurements: bool = False,
+    include_nutrition: bool = False,
+    scopes: tuple[str, ...] = SCOPES,
 ) -> MockConfigEntry:
     entry = MockConfigEntry(
         domain=DOMAIN,
@@ -49,9 +51,12 @@ def _entry(
             "access" + "_token": f"{person_slug}-access-token",
             "refresh" + "_token": f"{person_slug}-refresh-token",
             "expires_at": "2042-07-13T13:00:00+00:00",
-            "scopes": list(SCOPES),
+            "scopes": list(scopes),
         },
-        options={"include_body_measurements": include_body_measurements},
+        options={
+            "include_body_measurements": include_body_measurements,
+            "include_nutrition": include_nutrition,
+        },
     )
     entry.add_to_hass(hass)
     return entry
@@ -74,6 +79,12 @@ def _summary(
     steps: int | None,
     source: SourceKind = SourceKind.MIXED,
     expanded: ExpandedDailyMetrics | None = None,
+    total_energy_kcal: float | None = None,
+    nutrition_energy_kcal: float | None = None,
+    hydration_ml: float | None = None,
+    sleep_period_minutes: float | None = None,
+    sleep_onset_minutes: float | None = None,
+    sleep_after_wake_minutes: float | None = None,
 ) -> DailySummary:
     return DailySummary(
         date=day,
@@ -93,6 +104,12 @@ def _summary(
         source=source,
         complete=True,
         updated_at=NOW,
+        total_energy_kcal=total_energy_kcal,
+        nutrition_energy_kcal=nutrition_energy_kcal,
+        hydration_ml=hydration_ml,
+        sleep_period_minutes=sleep_period_minutes,
+        sleep_onset_minutes=sleep_onset_minutes,
+        sleep_after_wake_minutes=sleep_after_wake_minutes,
     )
 
 
@@ -115,6 +132,7 @@ def _coordinator(history) -> MagicMock:
 
 
 async def _setup_person(hass, entry: MockConfigEntry, history, coordinator):
+    history.async_shutdown = AsyncMock()
     with (
         patch(
             "custom_components.resiyhome_health_sync.GoogleHealthClient", return_value=MagicMock()
@@ -305,7 +323,11 @@ async def test_history_weight_is_hidden_when_body_measurements_are_disabled(hass
     row = _summary(
         date(2042, 7, 13),
         steps=6200,
-        expanded=ExpandedDailyMetrics(weight_kg=80.5),
+        expanded=ExpandedDailyMetrics(
+            weight_kg=80.5,
+            body_fat_percentage=21.4,
+            height_m=1.778,
+        ),
     )
     history = MagicMock()
     history.backfill_cursor = date(2042, 7, 1)
@@ -323,13 +345,192 @@ async def test_history_weight_is_hidden_when_body_measurements_are_disabled(hass
             "person": "sample_alpha",
             "start_date": "2042-07-13",
             "end_date": "2042-07-13",
-            "metrics": ["weight_kg"],
+            "metrics": ["weight_kg", "body_fat_percentage", "height_m"],
         },
     )
 
     assert connection.error is None
     assert connection.result is not None
-    assert connection.result["result"]["records"] == [{"date": "2042-07-13", "weight_kg": None}]
+    assert connection.result["result"]["records"] == [
+        {
+            "date": "2042-07-13",
+            "weight_kg": None,
+            "body_fat_percentage": None,
+            "height_m": None,
+        }
+    ]
+
+
+async def test_history_websocket_returns_allowlisted_parity_metrics(hass) -> None:
+    """Authorized requests expose normalized parity fields without paired metadata."""
+    _register_integration(hass)
+    entry = _entry(
+        hass,
+        person_slug="sample_alpha",
+        include_body_measurements=True,
+        include_nutrition=True,
+        scopes=(*SCOPES, NUTRITION_SCOPE),
+    )
+    row = _summary(
+        date(2042, 7, 13),
+        steps=6200,
+        total_energy_kcal=2410.5,
+        nutrition_energy_kcal=1830.0,
+        hydration_ml=2150.0,
+        sleep_period_minutes=402.0,
+        sleep_onset_minutes=6.0,
+        sleep_after_wake_minutes=12.0,
+        expanded=ExpandedDailyMetrics(
+            body_fat_percentage=21.4,
+            height_m=1.778,
+        ),
+    )
+    history = MagicMock()
+    history.async_load = AsyncMock(return_value=[row])
+    history.async_query = AsyncMock(return_value=[row])
+    await _setup_person(hass, entry, history, _coordinator(history))
+    connection = _Connection()
+
+    await _async_handle_history(
+        hass,
+        connection,
+        {
+            "id": 13,
+            "type": "resiyhome_health_sync/history",
+            "person": "sample_alpha",
+            "start_date": "2042-07-13",
+            "end_date": "2042-07-13",
+            "metrics": [
+                "total_energy_kcal",
+                "nutrition_energy_kcal",
+                "hydration_ml",
+                "sleep_period_minutes",
+                "sleep_onset_minutes",
+                "sleep_after_wake_minutes",
+                "body_fat_percentage",
+                "height_m",
+            ],
+        },
+    )
+
+    assert connection.error is None
+    assert connection.result is not None
+    assert connection.result["result"]["records"] == [
+        {
+            "date": "2042-07-13",
+            "total_energy_kcal": 2410.5,
+            "nutrition_energy_kcal": 1830.0,
+            "hydration_ml": 2150.0,
+            "sleep_period_minutes": 402.0,
+            "sleep_onset_minutes": 6.0,
+            "sleep_after_wake_minutes": 12.0,
+            "body_fat_percentage": 21.4,
+            "height_m": 1.778,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("include_nutrition", "scopes"),
+    [
+        (False, (*SCOPES, NUTRITION_SCOPE)),
+        (True, SCOPES),
+    ],
+)
+async def test_history_nutrition_requires_option_and_scope(
+    hass,
+    include_nutrition: bool,
+    scopes: tuple[str, ...],
+) -> None:
+    """Stored nutrition remains unavailable unless both consent gates are active."""
+    _register_integration(hass)
+    entry = _entry(
+        hass,
+        person_slug="sample_alpha",
+        include_nutrition=include_nutrition,
+        scopes=scopes,
+    )
+    row = _summary(
+        date(2042, 7, 13),
+        steps=6200,
+        nutrition_energy_kcal=1830.0,
+        hydration_ml=2150.0,
+    )
+    history = MagicMock()
+    history.async_load = AsyncMock(return_value=[row])
+    history.async_query = AsyncMock(return_value=[row])
+    await _setup_person(hass, entry, history, _coordinator(history))
+    connection = _Connection()
+
+    await _async_handle_history(
+        hass,
+        connection,
+        {
+            "id": 14,
+            "type": "resiyhome_health_sync/history",
+            "person": "sample_alpha",
+            "start_date": "2042-07-13",
+            "end_date": "2042-07-13",
+            "metrics": ["nutrition_energy_kcal", "hydration_ml"],
+        },
+    )
+
+    assert connection.error is None
+    assert connection.result is not None
+    assert connection.result["result"]["records"] == [
+        {
+            "date": "2042-07-13",
+            "nutrition_energy_kcal": None,
+            "hydration_ml": None,
+        }
+    ]
+
+
+async def test_history_optional_unavailable_values_remain_none(hass) -> None:
+    """Missing normalized values are never inferred as zero by history output."""
+    _register_integration(hass)
+    entry = _entry(
+        hass,
+        person_slug="sample_alpha",
+        include_body_measurements=True,
+        include_nutrition=True,
+        scopes=(*SCOPES, NUTRITION_SCOPE),
+    )
+    row = _summary(date(2042, 7, 13), steps=6200)
+    history = MagicMock()
+    history.async_load = AsyncMock(return_value=[row])
+    history.async_query = AsyncMock(return_value=[row])
+    await _setup_person(hass, entry, history, _coordinator(history))
+    connection = _Connection()
+    metrics = [
+        "total_energy_kcal",
+        "nutrition_energy_kcal",
+        "hydration_ml",
+        "sleep_period_minutes",
+        "sleep_onset_minutes",
+        "sleep_after_wake_minutes",
+        "body_fat_percentage",
+        "height_m",
+    ]
+
+    await _async_handle_history(
+        hass,
+        connection,
+        {
+            "id": 15,
+            "type": "resiyhome_health_sync/history",
+            "person": "sample_alpha",
+            "start_date": "2042-07-13",
+            "end_date": "2042-07-13",
+            "metrics": metrics,
+        },
+    )
+
+    assert connection.error is None
+    assert connection.result is not None
+    assert connection.result["result"]["records"] == [
+        {"date": "2042-07-13", **dict.fromkeys(metrics)}
+    ]
 
 
 async def test_expanded_history_accepts_exactly_ninety_inclusive_days(hass) -> None:
@@ -400,6 +601,10 @@ async def test_history_websocket_preserves_long_range_core_defaults(hass) -> Non
         "minimum_heart_rate",
         "maximum_heart_rate",
         "hrv_ms",
+        "total_energy_kcal",
+        "sleep_period_minutes",
+        "sleep_onset_minutes",
+        "sleep_after_wake_minutes",
         "source",
         "complete",
     }
@@ -435,6 +640,15 @@ async def test_history_websocket_preserves_long_range_core_defaults(hass) -> Non
                 "start_date": "2042-07-12",
                 "end_date": "2042-07-13",
                 "metrics": ["steps", "raw_points"],
+            },
+            "invalid_metric",
+        ),
+        (
+            {
+                "person": "sample_alpha",
+                "start_date": "2042-07-12",
+                "end_date": "2042-07-13",
+                "metrics": ["paired_devices"],
             },
             "invalid_metric",
         ),
@@ -482,8 +696,10 @@ async def test_history_websocket_registration_is_removed_after_final_entry_unloa
     sample_beta = _entry(hass, person_name="Sample Beta", person_slug="sample_beta")
     history_one = MagicMock()
     history_one.async_load = AsyncMock(return_value=[])
+    history_one.async_shutdown = AsyncMock()
     history_two = MagicMock()
     history_two.async_load = AsyncMock(return_value=[])
+    history_two.async_shutdown = AsyncMock()
     coordinator_one = _coordinator(history_one)
     coordinator_two = _coordinator(history_two)
 

@@ -24,15 +24,24 @@ from .api import (
     UpdateFailed,
     get_data_type_operations,
 )
+from .capabilities import CAPABILITIES, CapabilityId
 from .const import MANUAL_REFRESH_COOLDOWN, SCAN_INTERVAL
-from .expanded_metrics import normalize_expanded_day
+from .expanded_metrics import (
+    normalize_expanded_day,
+    normalize_hydration_ml,
+    normalize_latest_height,
+    normalize_nutrition_energy,
+)
 from .models import (
+    CapabilityRefreshState,
     CoordinatorSnapshot,
     DailySummary,
     ExpandedDailyMetrics,
+    PairedDeviceSummary,
     SourceKind,
 )
 from .normalize import DataPoint, DataPointStreams, normalize_day
+from .paired_devices import normalize_paired_devices
 from .storage import HealthHistoryStore
 
 _LOGGER = logging.getLogger(__name__)
@@ -57,6 +66,9 @@ _DATA_TYPES: tuple[str, ...] = (
     "steps",
 )
 
+_CORE_ACTIVITY_ROLLUP_TYPES: tuple[str, ...] = ("total-calories",)
+_CORE_DATA_TYPES = frozenset((*_DATA_TYPES, *_CORE_ACTIVITY_ROLLUP_TYPES))
+
 _EXPANDED_DIRECT_TYPES: tuple[str, ...] = (
     "daily-vo2-max",
     "daily-oxygen-saturation",
@@ -80,6 +92,9 @@ _EXPANDED_CURRENT_INTERVAL_TYPES: tuple[str, ...] = (
     "time-in-heart-rate-zone",
 )
 
+_BODY_MEASUREMENT_TYPES: tuple[str, ...] = ("weight", "body-fat", "height")
+_NUTRITION_DATA_TYPES = CAPABILITIES[CapabilityId.NUTRITION].data_types
+
 _EXPANDED_GROUP_FIELDS: Mapping[str, tuple[str, ...]] = {
     "daily-vo2-max": ("vo2_max", "vo2_estimated", "cardio_fitness_level"),
     "daily-oxygen-saturation": (
@@ -101,6 +116,18 @@ _EXPANDED_GROUP_FIELDS: Mapping[str, tuple[str, ...]] = {
     "time-in-heart-rate-zone": ("heart_zone_minutes",),
     "calories-in-heart-rate-zone": ("heart_zone_calories",),
     "weight": ("weight_kg",),
+    "body-fat": ("body_fat_percentage",),
+    "height": ("height_m",),
+}
+
+_BODY_MEASUREMENT_FIELDS: Mapping[str, tuple[str, str, str]] = {
+    "weight": ("weight_kg", "latest_weight_kg", "latest_weight_at"),
+    "body-fat": (
+        "body_fat_percentage",
+        "latest_body_fat_percentage",
+        "latest_body_fat_at",
+    ),
+    "height": ("height_m", "latest_height_m", "latest_height_at"),
 }
 
 OPTIONAL_PROBE_DATA_TYPES: tuple[str, ...] = (
@@ -124,7 +151,7 @@ OPTIONAL_PROBE_DATA_TYPES: tuple[str, ...] = (
 )
 
 _GROUP_TYPES: Mapping[str, frozenset[str]] = {
-    "active_energy": frozenset({"active-energy-burned"}),
+    "active_energy": frozenset({"active-energy-burned", "total-calories"}),
     "exercise_minutes": frozenset({"active-minutes"}),
     "hrv": frozenset({"daily-heart-rate-variability", "heart-rate-variability"}),
     "resting_heart_rate": frozenset({"daily-resting-heart-rate"}),
@@ -136,14 +163,20 @@ _GROUP_TYPES: Mapping[str, frozenset[str]] = {
 }
 
 _GROUP_FIELDS: Mapping[str, tuple[str, ...]] = {
-    "active_energy": ("active_energy_kcal",),
+    "active_energy": ("active_energy_kcal", "total_energy_kcal"),
     "exercise_minutes": ("exercise_minutes",),
     "hrv": ("hrv_ms",),
     "resting_heart_rate": ("resting_heart_rate",),
     "distance": ("distance_m",),
     "workouts": ("workouts",),
     "heart_rate": ("average_heart_rate", "minimum_heart_rate", "maximum_heart_rate"),
-    "sleep": ("sleep_minutes", "sleep_stages"),
+    "sleep": (
+        "sleep_minutes",
+        "sleep_stages",
+        "sleep_period_minutes",
+        "sleep_onset_minutes",
+        "sleep_after_wake_minutes",
+    ),
     "steps": ("steps", "fitbit_steps"),
 }
 
@@ -158,6 +191,7 @@ _PAYLOAD_KEYS: Mapping[str, str] = {
     "heart-rate-variability": "heartRateVariability",
     "sleep": "sleep",
     "steps": "steps",
+    "total-calories": "totalCalories",
 }
 
 type _NowProvider = Callable[[], datetime]
@@ -170,6 +204,22 @@ class _ExpandedWindowResult:
     direct: DataPointStreams
     rollups: DataPointStreams
     successful_types: frozenset[str]
+
+
+@dataclass(slots=True, frozen=True)
+class _NutritionRefreshResult:
+    """Normalized optional nutrition values and their independent refresh state."""
+
+    values: tuple[float | None, float | None] | None
+    state: CapabilityRefreshState
+
+
+@dataclass(slots=True, frozen=True)
+class _PairedDeviceRefreshResult:
+    """Sanitized paired-device values and their independent refresh state."""
+
+    values: tuple[PairedDeviceSummary, ...] | None
+    state: CapabilityRefreshState
 
 
 class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
@@ -205,6 +255,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         self._last_sleep_diagnostic: tuple[object, ...] | None = None
         self._last_fetch_diagnostic: tuple[object, ...] | None = None
         self._last_expanded_diagnostic: tuple[object, ...] | None = None
+        self._height_history_checked = False
 
     @property
     def data_types(self) -> tuple[str, ...]:
@@ -374,7 +425,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         except AuthenticationError:
             self.data.authorization_healthy = False
             raise
-        if not raw_complete or successful_types != frozenset(_DATA_TYPES):
+        if not raw_complete or successful_types != _CORE_DATA_TYPES:
             raise UpdateFailed("Google Health history window was incomplete")
 
         returned_days = _returned_days(streams, window_start, cursor)
@@ -456,7 +507,11 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
     @property
     def _expanded_data_types(self) -> tuple[str, ...]:
         if self._include_body_measurements:
-            return (*_EXPANDED_DIRECT_TYPES, "weight", *_EXPANDED_ROLLUP_TYPES)
+            return (
+                *_EXPANDED_DIRECT_TYPES,
+                *_BODY_MEASUREMENT_TYPES,
+                *_EXPANDED_ROLLUP_TYPES,
+            )
         return (*_EXPANDED_DIRECT_TYPES, *_EXPANDED_ROLLUP_TYPES)
 
     async def _async_acquire_current_lock(self) -> None:
@@ -513,7 +568,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         self.data.authorization_healthy = True
         self.data.expanded_backfill_cursor = cursor
         self.data.expanded_backfill_complete = cursor <= boundary
-        self._apply_latest_weight(summary)
+        self._apply_latest_body_measurements(summary)
 
     async def _async_refresh_current_locked(self, now: datetime) -> CoordinatorSnapshot:
         await self._async_ensure_history_loaded()
@@ -529,11 +584,18 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
                 end,
                 include_current_intervals=True,
             )
+            nutrition = await self._async_fetch_nutrition_current(
+                day,
+                start,
+                end,
+                now,
+            )
+            paired_devices = await self._async_fetch_paired_devices(now)
         except AuthenticationError:
             self.data.authorization_healthy = False
             raise
 
-        if not successful_types:
+        if not successful_types.intersection(_DATA_TYPES):
             raise UpdateFailed("Google Health current refresh failed")
 
         previous_rows = await self.history.async_query(day, day)
@@ -580,17 +642,186 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
                 expanded.successful_types,
             ),
         )
+        if nutrition.values is None:
+            nutrition_energy_kcal = (
+                previous.nutrition_energy_kcal if previous is not None else None
+            )
+            hydration_ml = previous.hydration_ml if previous is not None else None
+        else:
+            nutrition_energy_kcal, hydration_ml = nutrition.values
+        current = replace(
+            current,
+            nutrition_energy_kcal=nutrition_energy_kcal,
+            hydration_ml=hydration_ml,
+        )
         await self.history.async_upsert(current)
         self.data.current_day = current
         self.data.last_success = now
         self.data.authorization_healthy = True
         self.data.backfill_cursor = self.history.backfill_cursor
         self.data.expanded_backfill_cursor = self.history.expanded_backfill_cursor
-        if "weight" in expanded.successful_types:
-            await self._async_recompute_latest_weight(day)
-        else:
-            self._apply_latest_weight(current)
+        if paired_devices.values is not None:
+            self.data.paired_devices = paired_devices.values
+        self.data.capability_states = {
+            **self.data.capability_states,
+            CapabilityId.NUTRITION: nutrition.state,
+            CapabilityId.PAIRED_DEVICES: paired_devices.state,
+        }
+        successful_body_types = frozenset(_BODY_MEASUREMENT_TYPES).intersection(
+            expanded.successful_types
+        )
+        await self._async_recompute_latest_body_measurements(
+            day, successful_body_types
+        )
+        self._apply_latest_body_measurements(
+            current,
+            frozenset(_BODY_MEASUREMENT_TYPES).difference(successful_body_types),
+        )
+        await self._async_import_historical_height(now)
         return self.data
+
+    async def _async_import_historical_height(self, now: datetime) -> None:
+        """Import one sparse height snapshot when daily history has none."""
+        if (
+            not self._include_body_measurements
+            or self.data.latest_height_m is not None
+            or self._height_history_checked
+        ):
+            return
+        try:
+            points = await self.client.async_reconcile_all_height_data_points()
+        except AuthenticationError:
+            raise
+        except UpdateFailed:
+            return
+        self._height_history_checked = True
+        latest = normalize_latest_height(points)
+        if latest is None:
+            return
+
+        measured_day, height_m = latest
+        previous_rows = await self.history.async_query(measured_day, measured_day)
+        previous = previous_rows[0] if previous_rows else None
+        expanded = replace(
+            previous.expanded if previous is not None else ExpandedDailyMetrics(),
+            height_m=height_m,
+        )
+        summary = (
+            replace(previous, expanded=expanded, updated_at=now)
+            if previous is not None
+            else DailySummary(
+                date=measured_day,
+                expanded=expanded,
+                updated_at=now,
+            )
+        )
+        await self.history.async_upsert(summary)
+        self._apply_latest_body_measurements(summary, frozenset({"height"}))
+
+    async def _async_fetch_nutrition_current(
+        self,
+        day: date,
+        start: datetime,
+        end: datetime,
+        now: datetime,
+    ) -> _NutritionRefreshResult:
+        """Fetch and immediately reduce the independently authorized nutrition group."""
+        capability = CAPABILITIES[CapabilityId.NUTRITION]
+        grant = self.client.scope_grant
+        enabled = CapabilityId.NUTRITION in grant.enabled_capabilities
+        scope_granted = capability.required_scopes <= grant.granted_scopes
+        previous_state = self.data.capability_states.get(CapabilityId.NUTRITION)
+        last_success = previous_state.last_success if previous_state is not None else None
+
+        if not enabled or not scope_granted:
+            return _NutritionRefreshResult(
+                values=None,
+                state=CapabilityRefreshState(
+                    enabled=enabled,
+                    scope_granted=scope_granted,
+                    last_success=last_success,
+                    error_category="authorization" if enabled else None,
+                ),
+            )
+
+        streams: dict[str, Sequence[DataPoint]] = {}
+        for data_type in _NUTRITION_DATA_TYPES:
+            try:
+                streams[data_type] = await self.client.async_reconcile_data_points(
+                    data_type,
+                    start=start,
+                    end=end,
+                    source_family="all-sources",
+                )
+            except AuthenticationError:
+                raise
+            except UpdateFailed:
+                return _NutritionRefreshResult(
+                    values=None,
+                    state=CapabilityRefreshState(
+                        enabled=True,
+                        scope_granted=True,
+                        last_success=last_success,
+                        error_category="temporary",
+                    ),
+                )
+
+        return _NutritionRefreshResult(
+            values=(
+                normalize_nutrition_energy(streams["nutrition-log"], day),
+                normalize_hydration_ml(streams["hydration-log"], day),
+            ),
+            state=CapabilityRefreshState(
+                enabled=True,
+                scope_granted=True,
+                last_success=now,
+            ),
+        )
+
+    async def _async_fetch_paired_devices(self, now: datetime) -> _PairedDeviceRefreshResult:
+        """Fetch paired metadata only with explicit settings authorization."""
+        capability = CAPABILITIES[CapabilityId.PAIRED_DEVICES]
+        grant = self.client.scope_grant
+        enabled = CapabilityId.PAIRED_DEVICES in grant.enabled_capabilities
+        scope_granted = capability.required_scopes <= grant.granted_scopes
+        previous_state = self.data.capability_states.get(CapabilityId.PAIRED_DEVICES)
+        last_success = previous_state.last_success if previous_state is not None else None
+
+        if not enabled or not scope_granted:
+            return _PairedDeviceRefreshResult(
+                values=(),
+                state=CapabilityRefreshState(
+                    enabled=enabled,
+                    scope_granted=scope_granted,
+                    last_success=last_success,
+                    error_category="authorization" if enabled else None,
+                ),
+            )
+
+        try:
+            payloads = await self.client.async_list_paired_devices()
+            devices = normalize_paired_devices(payloads)
+        except AuthenticationError:
+            raise
+        except UpdateFailed, ValueError:
+            return _PairedDeviceRefreshResult(
+                values=None,
+                state=CapabilityRefreshState(
+                    enabled=True,
+                    scope_granted=True,
+                    last_success=last_success,
+                    error_category="temporary",
+                ),
+            )
+
+        return _PairedDeviceRefreshResult(
+            values=devices,
+            state=CapabilityRefreshState(
+                enabled=True,
+                scope_granted=True,
+                last_success=now,
+            ),
+        )
 
     def _log_sleep_diagnostics(
         self, reason: str, day: date, start: datetime, end: datetime, streams: _WindowStreams
@@ -615,7 +846,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         if signature == self._last_sleep_diagnostic:
             return
         self._last_sleep_diagnostic = signature
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Sleep diagnostics for current refresh: "
             "reason=%s day=%s window_start=%s window_end=%s raw_count=%d "
             "all_sources_count=%d raw_summary_count=%d all_sources_summary_count=%d "
@@ -669,7 +900,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         if signature == self._last_fetch_diagnostic:
             return
         self._last_fetch_diagnostic = signature
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Fetch diagnostics for current refresh: "
             "day=%s window_start=%s window_end=%s successful_types=%s "
             "raw_counts=%s all_sources_counts=%s wearables_counts=%s raw_platforms=%s "
@@ -716,7 +947,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         if signature == self._last_expanded_diagnostic:
             return
         self._last_expanded_diagnostic = signature
-        _LOGGER.warning(
+        _LOGGER.debug(
             "Expanded diagnostics for current refresh: "
             "day=%s successful_types=%s direct_counts=%s rollup_counts=%s availability=%s",
             day.isoformat(),
@@ -738,40 +969,79 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         self.data.backfill_cursor = self.history.backfill_cursor
         self.data.expanded_backfill_cursor = self.history.expanded_backfill_cursor
         if self._include_body_measurements:
+            missing_types = set(_BODY_MEASUREMENT_TYPES)
             for summary in reversed(rows):
-                if summary.expanded.weight_kg is not None:
-                    self._apply_latest_weight(summary)
+                for data_type in tuple(missing_types):
+                    value_field, _, _ = _BODY_MEASUREMENT_FIELDS[data_type]
+                    if getattr(summary.expanded, value_field) is not None:
+                        self._apply_latest_body_measurements(
+                            summary, frozenset({data_type})
+                        )
+                        missing_types.remove(data_type)
+                if not missing_types:
                     break
         else:
-            self.data.latest_weight_kg = None
-            self.data.latest_weight_at = None
+            for _, latest_value_field, latest_date_field in (
+                _BODY_MEASUREMENT_FIELDS.values()
+            ):
+                setattr(self.data, latest_value_field, None)
+                setattr(self.data, latest_date_field, None)
             if self.data.current_day is not None:
                 self.data.current_day = replace(
                     self.data.current_day,
                     expanded=replace(
                         self.data.current_day.expanded,
                         weight_kg=None,
+                        body_fat_percentage=None,
+                        height_m=None,
                     ),
                 )
 
-    def _apply_latest_weight(self, summary: DailySummary) -> None:
-        weight = summary.expanded.weight_kg
-        if not self._include_body_measurements or weight is None:
-            return
-        if self.data.latest_weight_at is None or summary.date >= self.data.latest_weight_at:
-            self.data.latest_weight_kg = weight
-            self.data.latest_weight_at = summary.date
-
-    async def _async_recompute_latest_weight(self, end: date) -> None:
-        """Rebuild latest weight after a successful current-day weight replacement."""
-        self.data.latest_weight_kg = None
-        self.data.latest_weight_at = None
+    def _apply_latest_body_measurements(
+        self,
+        summary: DailySummary,
+        data_types: frozenset[str] = frozenset(_BODY_MEASUREMENT_TYPES),
+    ) -> None:
+        """Apply independently dated latest values from one normalized day."""
         if not self._include_body_measurements:
             return
+        for data_type in data_types:
+            value_field, latest_value_field, latest_date_field = (
+                _BODY_MEASUREMENT_FIELDS[data_type]
+            )
+            value = getattr(summary.expanded, value_field)
+            latest_date = getattr(self.data, latest_date_field)
+            if value is not None and (
+                latest_date is None or summary.date >= latest_date
+            ):
+                setattr(self.data, latest_value_field, value)
+                setattr(self.data, latest_date_field, summary.date)
+
+    async def _async_recompute_latest_body_measurements(
+        self,
+        end: date,
+        data_types: frozenset[str],
+    ) -> None:
+        """Rebuild only body streams replaced by a successful current fetch."""
+        if not self._include_body_measurements or not data_types:
+            return
+        missing_types = set(data_types)
+        for data_type in missing_types:
+            _, latest_value_field, latest_date_field = _BODY_MEASUREMENT_FIELDS[
+                data_type
+            ]
+            setattr(self.data, latest_value_field, None)
+            setattr(self.data, latest_date_field, None)
         rows = await self.history.async_query(date.min, end)
         for summary in reversed(rows):
-            if summary.expanded.weight_kg is not None:
-                self._apply_latest_weight(summary)
+            for data_type in tuple(missing_types):
+                value_field, _, _ = _BODY_MEASUREMENT_FIELDS[data_type]
+                if getattr(summary.expanded, value_field) is not None:
+                    self._apply_latest_body_measurements(
+                        summary, frozenset({data_type})
+                    )
+                    missing_types.remove(data_type)
+            if not missing_types:
                 return
 
     async def _async_fetch_window(
@@ -819,6 +1089,20 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
             wearables[data_type] = wearable_points
             successful_types.add(data_type)
 
+        for data_type in _CORE_ACTIVITY_ROLLUP_TYPES:
+            try:
+                all_sources[data_type] = await self.client.async_daily_rollup_data_points(
+                    data_type,
+                    start=start,
+                    end=end,
+                    source_family="all-sources",
+                )
+            except AuthenticationError:
+                raise
+            except UpdateFailed:
+                continue
+            successful_types.add(data_type)
+
         return (
             _WindowStreams(raw=raw, all_sources=all_sources, wearables=wearables),
             frozenset(successful_types),
@@ -837,7 +1121,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         successful_types: set[str] = set()
 
         direct_types: tuple[str, ...] = (
-            (*_EXPANDED_DIRECT_TYPES, "weight")
+            (*_EXPANDED_DIRECT_TYPES, *_BODY_MEASUREMENT_TYPES)
             if self._include_body_measurements
             else _EXPANDED_DIRECT_TYPES
         )
@@ -953,7 +1237,11 @@ def _streams_for_day(streams: DataPointStreams, day: date) -> dict[str, Sequence
         dated = tuple(point for point in points if _point_day(data_type, point) == day)
         if dated:
             result[data_type] = dated
-        elif points and all(_point_day(data_type, point) is None for point in points):
+        elif (
+            data_type != "total-calories"
+            and points
+            and all(_point_day(data_type, point) is None for point in points)
+        ):
             # Raw list records can contain platform attribution without a time field.
             result[data_type] = points
     return result
@@ -1007,7 +1295,7 @@ def _log_optional_probe(results: Mapping[str, Mapping[str, object]]) -> None:
             f"all_sources={result['all_sources_count']} "
             f"wearables={result['wearables_count']} platforms={platform_label}"
         )
-    _LOGGER.warning("Optional data type availability probe: %s", "; ".join(summaries))
+    _LOGGER.info("Optional data type availability probe: %s", "; ".join(summaries))
 
 
 def _format_sequence(values: tuple[str, ...]) -> str:
@@ -1037,6 +1325,8 @@ def _point_day(data_type: str, point: DataPoint) -> date | None:
     payload = point.get(_PAYLOAD_KEYS[data_type])
     if not isinstance(payload, Mapping):
         return None
+    if data_type == "total-calories":
+        return _daily_rollup_date(point, "civilStartTime")
     if data_type in {"daily-heart-rate-variability", "daily-resting-heart-rate"}:
         daily = payload.get("date")
         if not isinstance(daily, Mapping):
@@ -1060,6 +1350,29 @@ def _point_day(data_type: str, point: DataPoint) -> date | None:
         if civil_day is not None:
             return civil_day
     return _physical_date(interval, "startTime", "startUtcOffset")
+
+
+def _daily_rollup_date(value: object, time_key: str) -> date | None:
+    if not isinstance(value, Mapping):
+        return None
+    civil = value.get(time_key)
+    if not isinstance(civil, Mapping):
+        return None
+    if "time" in civil:
+        return _civil_date(value, time_key)
+
+    civil_date = civil.get("date")
+    if not isinstance(civil_date, Mapping):
+        return None
+    year = civil_date.get("year")
+    month = civil_date.get("month")
+    day = civil_date.get("day")
+    if not all(type(component) is int for component in (year, month, day)):
+        return None
+    try:
+        return date(cast(int, year), cast(int, month), cast(int, day))
+    except ValueError:
+        return None
 
 
 def _civil_date(value: object, time_key: str) -> date | None:

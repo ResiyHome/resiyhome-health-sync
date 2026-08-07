@@ -11,16 +11,26 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import UnitOfEnergy, UnitOfLength, UnitOfMass, UnitOfTime
-from homeassistant.core import HomeAssistant
+from homeassistant.components.sensor.const import DOMAIN as SENSOR_DOMAIN
+from homeassistant.const import (
+    PERCENTAGE,
+    UnitOfEnergy,
+    UnitOfLength,
+    UnitOfMass,
+    UnitOfTime,
+    UnitOfVolume,
+)
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import HealthSyncConfigEntry
+from .capabilities import CapabilityId
 from .const import DOMAIN
 from .coordinator import HealthSyncCoordinator
-from .models import CoordinatorSnapshot, DailySummary, SourceKind
+from .models import CoordinatorSnapshot, DailySummary, PairedDeviceSummary, SourceKind
 
 type SensorValue = date | datetime | float | int | str | None
 type ValueFunction = Callable[[CoordinatorSnapshot], SensorValue]
@@ -35,7 +45,7 @@ class HealthSyncSensorEntityDescription(SensorEntityDescription):
     value_fn: ValueFunction
     attributes_fn: AttributesFunction | None = None
     summary_metadata: bool = False
-    requires_body_measurements: bool = False
+    required_capability: CapabilityId | None = None
 
 
 def _summary_value(field: str) -> ValueFunction:
@@ -124,9 +134,12 @@ def _heart_zone_threshold_attributes(zone: str) -> AttributesFunction:
     return attributes
 
 
-def _weight_attributes(snapshot: CoordinatorSnapshot) -> dict[str, AttributeValue] | None:
-    measured_at = snapshot.latest_weight_at
-    return {"measurement_date": measured_at.isoformat()} if measured_at is not None else None
+def _measurement_date(field: str) -> AttributesFunction:
+    def attributes(snapshot: CoordinatorSnapshot) -> dict[str, AttributeValue] | None:
+        measured_at = cast(date | None, getattr(snapshot, field))
+        return {"measurement_date": measured_at.isoformat()} if measured_at is not None else None
+
+    return attributes
 
 
 def _last_workout_field(field: str) -> ValueFunction:
@@ -186,6 +199,45 @@ SENSOR_DESCRIPTIONS: tuple[HealthSyncSensorEntityDescription, ...] = (
         summary_metadata=True,
     ),
     HealthSyncSensorEntityDescription(
+        key="total_calories_burned_today",
+        name="Total calories burned today",
+        translation_key="total_calories_burned_today",
+        icon="mdi:fire",
+        native_unit_of_measurement=UnitOfEnergy.KILO_CALORIE,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=_DAILY_TOTALS,
+        suggested_display_precision=1,
+        value_fn=_summary_value("total_energy_kcal"),
+        summary_metadata=True,
+        required_capability=CapabilityId.CORE_ACTIVITY,
+    ),
+    HealthSyncSensorEntityDescription(
+        key="calories_consumed_today",
+        name="Calories consumed today",
+        translation_key="calories_consumed_today",
+        icon="mdi:food-apple-outline",
+        native_unit_of_measurement=UnitOfEnergy.KILO_CALORIE,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=_DAILY_TOTALS,
+        suggested_display_precision=1,
+        value_fn=_summary_value("nutrition_energy_kcal"),
+        summary_metadata=True,
+        required_capability=CapabilityId.NUTRITION,
+    ),
+    HealthSyncSensorEntityDescription(
+        key="water_consumed_today",
+        name="Water consumed today",
+        translation_key="water_consumed_today",
+        icon="mdi:cup-water",
+        native_unit_of_measurement=UnitOfVolume.MILLILITERS,
+        device_class=SensorDeviceClass.VOLUME,
+        state_class=_DAILY_TOTALS,
+        suggested_display_precision=1,
+        value_fn=_summary_value("hydration_ml"),
+        summary_metadata=True,
+        required_capability=CapabilityId.NUTRITION,
+    ),
+    HealthSyncSensorEntityDescription(
         key="exercise_minutes_today",
         name="Exercise minutes today",
         icon="mdi:run",
@@ -206,6 +258,45 @@ SENSOR_DESCRIPTIONS: tuple[HealthSyncSensorEntityDescription, ...] = (
         suggested_display_precision=1,
         value_fn=_summary_value("sleep_minutes"),
         summary_metadata=True,
+    ),
+    HealthSyncSensorEntityDescription(
+        key="sleep_time_in_bed",
+        name="Sleep time in bed",
+        translation_key="sleep_time_in_bed",
+        icon="mdi:bed-clock",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        device_class=SensorDeviceClass.DURATION,
+        state_class=_MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=_summary_value("sleep_period_minutes"),
+        summary_metadata=True,
+        required_capability=CapabilityId.SLEEP,
+    ),
+    HealthSyncSensorEntityDescription(
+        key="sleep_time_to_fall_asleep",
+        name="Sleep time to fall asleep",
+        translation_key="sleep_time_to_fall_asleep",
+        icon="mdi:timer-sand",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        device_class=SensorDeviceClass.DURATION,
+        state_class=_MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=_summary_value("sleep_onset_minutes"),
+        summary_metadata=True,
+        required_capability=CapabilityId.SLEEP,
+    ),
+    HealthSyncSensorEntityDescription(
+        key="sleep_time_after_waking",
+        name="Sleep time after waking",
+        translation_key="sleep_time_after_waking",
+        icon="mdi:alarm",
+        native_unit_of_measurement=UnitOfTime.MINUTES,
+        device_class=SensorDeviceClass.DURATION,
+        state_class=_MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=_summary_value("sleep_after_wake_minutes"),
+        summary_metadata=True,
+        required_capability=CapabilityId.SLEEP,
     ),
     HealthSyncSensorEntityDescription(
         key="sleep_awake_duration",
@@ -469,8 +560,35 @@ SENSOR_DESCRIPTIONS: tuple[HealthSyncSensorEntityDescription, ...] = (
         suggested_display_precision=1,
         entity_registry_enabled_default=False,
         value_fn=lambda snapshot: snapshot.latest_weight_kg,
-        attributes_fn=_weight_attributes,
-        requires_body_measurements=True,
+        attributes_fn=_measurement_date("latest_weight_at"),
+        required_capability=CapabilityId.BODY_MEASUREMENTS,
+    ),
+    HealthSyncSensorEntityDescription(
+        key="body_fat",
+        name="Body fat",
+        translation_key="body_fat",
+        icon="mdi:percent-outline",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=_MEASUREMENT,
+        suggested_display_precision=1,
+        entity_registry_enabled_default=False,
+        value_fn=lambda snapshot: snapshot.latest_body_fat_percentage,
+        attributes_fn=_measurement_date("latest_body_fat_at"),
+        required_capability=CapabilityId.BODY_MEASUREMENTS,
+    ),
+    HealthSyncSensorEntityDescription(
+        key="height",
+        name="Height",
+        translation_key="height",
+        icon="mdi:human-male-height",
+        native_unit_of_measurement=UnitOfLength.METERS,
+        device_class=SensorDeviceClass.DISTANCE,
+        state_class=_MEASUREMENT,
+        suggested_display_precision=3,
+        entity_registry_enabled_default=False,
+        value_fn=lambda snapshot: snapshot.latest_height_m,
+        attributes_fn=_measurement_date("latest_height_at"),
+        required_capability=CapabilityId.BODY_MEASUREMENTS,
     ),
     HealthSyncSensorEntityDescription(
         key="last_workout_type",
@@ -525,6 +643,48 @@ SENSOR_DESCRIPTIONS: tuple[HealthSyncSensorEntityDescription, ...] = (
     ),
 )
 
+PAIRED_DEVICE_SENSOR_DESCRIPTIONS: tuple[SensorEntityDescription, ...] = (
+    SensorEntityDescription(
+        key="battery_level",
+        translation_key="battery_level",
+        icon="mdi:battery",
+        native_unit_of_measurement=PERCENTAGE,
+        device_class=SensorDeviceClass.BATTERY,
+        state_class=_MEASUREMENT,
+        suggested_display_precision=0,
+    ),
+    SensorEntityDescription(
+        key="last_device_sync",
+        translation_key="last_device_sync",
+        icon="mdi:cellphone-sync",
+        device_class=SensorDeviceClass.TIMESTAMP,
+    ),
+)
+
+
+def _person_sensor_descriptions(
+    hass: HomeAssistant,
+    entry: HealthSyncConfigEntry,
+) -> tuple[HealthSyncSensorEntityDescription, ...]:
+    """Return sensors eligible for first registration or retained reload."""
+    registry = er.async_get(hass)
+    person_slug = str(entry.data["person_slug"])
+    nutrition_available = (
+        CapabilityId.NUTRITION in entry.runtime_data.scope_grant.available_capabilities
+    )
+    return tuple(
+        description
+        for description in SENSOR_DESCRIPTIONS
+        if description.required_capability is not CapabilityId.NUTRITION
+        or nutrition_available
+        or registry.async_get_entity_id(
+            SENSOR_DOMAIN,
+            DOMAIN,
+            f"{person_slug}_{description.key}",
+        )
+        is not None
+    )
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -532,11 +692,31 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up one person's normalized health sensors."""
-    del hass
     coordinator = entry.runtime_data.coordinator
     async_add_entities(
-        HealthSyncSensor(entry, coordinator, description) for description in SENSOR_DESCRIPTIONS
+        HealthSyncSensor(entry, coordinator, description)
+        for description in _person_sensor_descriptions(hass, entry)
     )
+    person_slug = str(entry.data["person_slug"])
+    added: set[tuple[str, str, str]] = set()
+
+    @callback
+    def _async_add_paired_device_entities() -> None:
+        new_entities: list[HealthSyncPairedDeviceSensor] = []
+        for device in coordinator.data.paired_devices:
+            for description in PAIRED_DEVICE_SENSOR_DESCRIPTIONS:
+                identity = (person_slug, device.identity_digest, description.key)
+                if identity in added:
+                    continue
+                added.add(identity)
+                new_entities.append(
+                    HealthSyncPairedDeviceSensor(entry, coordinator, device, description)
+                )
+        if new_entities:
+            async_add_entities(new_entities)
+
+    _async_add_paired_device_entities()
+    entry.async_on_unload(coordinator.async_add_listener(_async_add_paired_device_entities))
 
 
 class HealthSyncSensor(CoordinatorEntity[HealthSyncCoordinator], SensorEntity):
@@ -552,10 +732,8 @@ class HealthSyncSensor(CoordinatorEntity[HealthSyncCoordinator], SensorEntity):
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = description
+        self._entry = entry
         self._person_slug = str(entry.data["person_slug"])
-        self._body_measurements_enabled = bool(
-            entry.options.get("include_body_measurements", False)
-        )
         self._attr_name = f"{entry.title} {description.name}"
         self._attr_unique_id = f"{self._person_slug}_{description.key}"
         self._attr_device_info = DeviceInfo(
@@ -582,10 +760,7 @@ class HealthSyncSensor(CoordinatorEntity[HealthSyncCoordinator], SensorEntity):
     @override
     def native_value(self) -> SensorValue:
         """Return the normalized value without substituting missing data."""
-        if (
-            self.entity_description.requires_body_measurements
-            and not self._body_measurements_enabled
-        ):
+        if not self._capability_available:
             return None
         return self.entity_description.value_fn(self.coordinator.data)
 
@@ -593,10 +768,7 @@ class HealthSyncSensor(CoordinatorEntity[HealthSyncCoordinator], SensorEntity):
     @override
     def extra_state_attributes(self) -> dict[str, AttributeValue] | None:
         """Expose only explicitly allowlisted normalized metadata."""
-        if (
-            self.entity_description.requires_body_measurements
-            and not self._body_measurements_enabled
-        ):
+        if not self._capability_available:
             return None
         attributes: dict[str, AttributeValue] = {}
         summary: DailySummary | None = self.coordinator.data.current_day
@@ -613,3 +785,82 @@ class HealthSyncSensor(CoordinatorEntity[HealthSyncCoordinator], SensorEntity):
         if self.entity_description.attributes_fn is not None:
             attributes.update(self.entity_description.attributes_fn(self.coordinator.data) or {})
         return attributes or None
+
+    @property
+    def _capability_available(self) -> bool:
+        """Return whether this entry can currently provide the sensor's data."""
+        required = self.entity_description.required_capability
+        return (
+            required is None
+            or required in self._entry.runtime_data.scope_grant.available_capabilities
+        )
+
+
+class HealthSyncPairedDeviceSensor(CoordinatorEntity[HealthSyncCoordinator], SensorEntity):
+    """Represent one sanitized value from a Google paired device."""
+
+    _attr_has_entity_name = True
+    entity_description: SensorEntityDescription
+
+    def __init__(
+        self,
+        entry: HealthSyncConfigEntry,
+        coordinator: HealthSyncCoordinator,
+        device: PairedDeviceSummary,
+        description: SensorEntityDescription,
+    ) -> None:
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._identity_digest = device.identity_digest
+        person_slug = str(entry.data["person_slug"])
+        paired_identifier = f"{person_slug}_paired_{device.identity_digest}"
+        self._attr_unique_id = f"{paired_identifier}_{description.key}"
+        self._attr_device_info = DeviceInfo(
+            entry_type=DeviceEntryType.SERVICE,
+            identifiers={(DOMAIN, paired_identifier)},
+            name=f"{entry.title} {device.product_name}",
+            manufacturer="ResiyHome",
+            model=device.product_name,
+            model_id=device.device_type,
+        )
+
+    @property
+    def _paired_device(self) -> PairedDeviceSummary | None:
+        return next(
+            (
+                device
+                for device in self.coordinator.data.paired_devices
+                if device.identity_digest == self._identity_digest
+            ),
+            None,
+        )
+
+    @property
+    @override
+    def available(self) -> bool:
+        """Expose a retained entity as unavailable while its device is absent."""
+        return self._paired_device is not None and self.native_value is not None
+
+    @property
+    @override
+    def native_value(self) -> datetime | int | None:
+        """Return the paired value without retaining raw Google identifiers."""
+        device = self._paired_device
+        if device is None:
+            return None
+        if self.entity_description.key == "battery_level":
+            return device.battery_percentage
+        return device.last_sync
+
+    @property
+    @override
+    def extra_state_attributes(self) -> dict[str, AttributeValue] | None:
+        """Expose only the documented normalized battery status."""
+        device = self._paired_device
+        if (
+            device is None
+            or self.entity_description.key != "battery_level"
+            or device.battery_status is None
+        ):
+            return None
+        return {"battery_status": device.battery_status}

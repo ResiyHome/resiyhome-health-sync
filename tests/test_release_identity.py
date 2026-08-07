@@ -32,6 +32,8 @@ def test_stable_entity_keys_survive_rebrand() -> None:
         "average_heart_rate",
         "backfill_cursor",
         "backfill_status",
+        "body_fat",
+        "calories_consumed_today",
         "current_source",
         "daily_oxygen_saturation",
         "daily_respiratory_rate",
@@ -50,6 +52,7 @@ def test_stable_entity_keys_survive_rebrand() -> None:
         "heart_rate_zone_peak_minutes_today",
         "heart_rate_zone_vigorous_calories_today",
         "heart_rate_zone_vigorous_minutes_today",
+        "height",
         "steps_today",
         "last_successful_synchronization",
         "last_sleep_duration",
@@ -62,11 +65,16 @@ def test_stable_entity_keys_survive_rebrand() -> None:
         "sleep_awake_duration",
         "sleep_deep_duration",
         "sleep_deep_respiratory_rate",
+        "sleep_time_after_waking",
+        "sleep_time_in_bed",
+        "sleep_time_to_fall_asleep",
         "sleep_light_duration",
         "sleep_light_respiratory_rate",
         "sleep_rem_duration",
         "sleep_rem_respiratory_rate",
         "sleep_respiratory_rate",
+        "total_calories_burned_today",
+        "water_consumed_today",
         "weight",
     }
 
@@ -93,4 +101,4 @@ def test_runtime_platforms_use_only_resiyhome_as_manufacturer() -> None:
             and isinstance(keyword.value, ast.Constant)
             and isinstance(keyword.value.value, str)
         ]
-        assert manufacturers == ["ResiyHome"], relative_path
+        assert manufacturers and set(manufacturers) == {"ResiyHome"}, relative_path

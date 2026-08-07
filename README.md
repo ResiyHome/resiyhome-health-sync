@@ -3,9 +3,9 @@
 # Health Sync by ResiyHome
 
 Health Sync is a read-only Home Assistant custom integration that turns a person's
-Google Health data into person-scoped entities and normalized daily history. Release 1.0.3
-polls Google every 15 minutes, supports multiple independently authorized people,
-and keeps OAuth under the user's control.
+Google Health data into person-scoped entities and normalized daily history. It polls
+Google every 15 minutes, supports multiple independently authorized people, and keeps
+OAuth under the user's control.
 
 This project is independent and is not affiliated with, sponsored by, endorsed by, or
 officially connected with Google LLC, Alphabet Inc., Home Assistant, Nabu Casa, Fitbit,
@@ -13,15 +13,18 @@ or Apple Inc. Product names are used only to describe interoperability.
 
 ## Features and privacy
 
-- Activity, sleep, heart, respiratory, oxygen, fitness, workout, and synchronization
-  entities, with optional weight collection.
+- Activity, total-calorie, sleep, heart, respiratory, oxygen, fitness, workout, and
+  synchronization entities.
+- Optional body measurements, current-day nutrition and hydration totals, and current
+  paired-device battery and sync metadata.
 - One config entry and one Google authorization per person.
 - Google-reconciled all-source stream values, Fitbit attribution, and HealthKit-derived
   fallback classification without connecting directly to Apple Health.
 - Compact normalized daily summaries instead of stored raw Google API payloads.
 - Redacted diagnostics that report availability and synchronization health without
   health values, OAuth credentials, or Google identifiers.
-- Read-only access through exactly three Google Health permissions.
+- Three baseline read-only scopes, plus two optional read-only scopes requested only
+  when the matching per-person options are enabled.
 
 This integration is not a medical device and does not provide medical advice,
 diagnosis, treatment, or emergency monitoring.
@@ -48,11 +51,22 @@ See the [complete installation guide](docs/installation.md) before starting.
 
 Each installation must use a Google Cloud project and OAuth client owned by its users.
 ResiyHome does not provide a hosted OAuth service, shared client, credential proxy, or
-backend. The client must grant exactly these current read-only scopes:
+backend. Every person must grant these three baseline read-only scopes:
 
 - `https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly`
 - `https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly`
 - `https://www.googleapis.com/auth/googlehealth.sleep.readonly`
+
+The two optional read-only scopes are:
+
+- `https://www.googleapis.com/auth/googlehealth.nutrition.readonly` for
+  `include_nutrition`
+- `https://www.googleapis.com/auth/googlehealth.settings.readonly` for
+  `include_paired_devices`
+
+Body measurements use the existing baseline health-measurements scope and do not add
+another permission. Existing baseline-only authorizations remain valid until a person
+enables an option that needs an optional scope.
 
 Use `https://my.home-assistant.io/redirect/oauth` as the Authorized redirect URI when
 using Home Assistant's standard My Home Assistant callback. Full setup, Testing-mode
@@ -63,10 +77,14 @@ expiration, and secret-handling details are in the
 
 Use one user-owned Google Cloud project and client, then create one independently
 authorized config entry per person. Use a private browser window or explicitly switch
-Google accounts for each authorization. Choose a stable unique person slug and use
-**Reauthenticate** on an existing entry instead of adding the same person again.
-[Multi-user setup](docs/multi-user.md) explains the sequence and per-person body
-measurement option.
+Google accounts for each authorization. Home Assistant asks for a person name, and
+Health Sync derives the stable person slug from that name. Users do not enter or choose
+the slug directly. The derived slug provides stable entity unique IDs and service and
+action targeting within the existing config entry. The normalized history store is keyed
+by the Home Assistant config-entry ID, not by the person slug. Use **Reauthenticate** on
+that existing entry so both identity mechanisms remain attached to the same entry.
+[Multi-user setup](docs/multi-user.md) explains the per-person option, consent, and
+entity-registry sequence.
 
 ## Expanded Metrics
 
@@ -85,10 +103,13 @@ The following detailed entities are Disabled by default:
 - calories for light, moderate, vigorous, and peak heart-rate zones
 - sleep respiratory rate for deep, light, and REM sleep
 - Weight
+- Body-fat percentage
+- Height
 
-Weight is disabled by default in the entity registry. Enabling the entity and opting in
-to body measurements are separate steps. The per-person `include_body_measurements`
-option starts a bounded 90-day normalized backfill for weight. After you enable the
+Weight is disabled by default in the entity registry. Body-fat percentage and Height use
+the same default. Enabling an entity and opting in to body measurements are separate
+steps. The per-person `include_body_measurements` option starts a bounded
+90-day normalized backfill for weight, body-fat percentage, and height. After you enable the
 entity, its state may be unavailable until body measurements are opted in and Google
 supplies usable data. A valid zero is retained as data; unavailable means no usable value
 was obtained, not that the entity is disabled.
@@ -100,12 +121,51 @@ daily rollup. A published daily rollup takes precedence.
 Only expanded-metric polling avoids raw high-volume streams; core source attribution transiently inspects raw records.
 Neither path stores raw API payloads or Google identifiers.
 
+## Optional nutrition and paired devices
+
+Enable `include_nutrition`, `include_paired_devices`, or both from one person's Health
+Sync options. If the saved authorization lacks the matching optional scope, Home Assistant
+starts reauthorization for that same config entry. Declining an optional permission
+leaves baseline sensors working, while the declined capability remains unavailable.
+
+For an existing installation, authorize nutrition without removing the person:
+
+1. Install the current Health Sync release completely through HACS and restart
+   Home Assistant once.
+2. Open **Settings > Devices & services > Health Sync by ResiyHome**.
+3. Open the existing person's entry, select **Configure**, and enable
+   `include_nutrition`.
+4. Complete **Reauthenticate** on that same entry with that same person's
+   Google account.
+5. On Google's consent screen, select the Google Health nutrition permission
+   and continue. The requested scope is
+   `https://www.googleapis.com/auth/googlehealth.nutrition.readonly`.
+6. Run the Health Sync refresh action or wait for the next 15-minute poll.
+
+Repeat these steps for each person who wants nutrition values. Do not delete
+and recreate an entry to add the scope; reauthorization preserves its entity
+identity and normalized history.
+
+Nutrition adds Calories consumed today and Water consumed today from Google's
+`nutrition-log` and `hydration-log` all-source results for the current local day.
+Nutrition has no historical backfill in this release. Daily normalized nutrition begins
+with the first successful opt-in refresh.
+
+Paired devices add one Home Assistant service device for each Google paired tracker or
+scale, with Battery level and Paired-device last sync entities. The paired-device
+timestamp is Fitbit mobile-device sync time reported by Google's `lastSyncTime`; it is
+not Health Sync API refresh time and Health Sync does not cause the wearable or mobile
+application to synchronize. Paired metadata is current only and is absent from normalized
+history.
+
 ## Refresh contract
 
-A fully successful, non-paginated refresh makes 35 logical data requests when body
-measurements are disabled and 36 when body measurements are enabled. This includes core
+A fully successful, non-paginated refresh of baseline capabilities makes
+36 logical data requests when body measurements are disabled and 39 when body measurements are enabled. This includes core
 raw source-attribution requests, core and expanded reconciled requests, the wearable
 steps request, current-day interval fallbacks, and expanded daily rollups.
+Nutrition adds two current-day reconcile requests. Paired devices add one list request.
+With every option enabled, a non-paginated refresh therefore makes 42 logical data requests.
 Pagination can increase the actual HTTP request count.
 A one-time authentication retry can add a token request.
 

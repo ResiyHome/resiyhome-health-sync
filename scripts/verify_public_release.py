@@ -455,7 +455,7 @@ def scan_tree(root: Path) -> None:
 
 
 def scan_history(root: Path) -> None:
-    """Scan reachable patches and every commit/path/blob association."""
+    """Scan patches and commit/path/blob associations reachable from HEAD."""
     history = subprocess.run(
         [
             "git",
@@ -463,7 +463,7 @@ def scan_history(root: Path) -> None:
             "--format=%H%n%B",
             "-m",
             "-p",
-            "--all",
+            "HEAD",
             "--no-ext-diff",
         ],
         cwd=root,
@@ -474,7 +474,7 @@ def scan_history(root: Path) -> None:
     scan_text(history.stdout, "reachable Git history")
 
     commits = subprocess.run(
-        ["git", "rev-list", "--all"],
+        ["git", "rev-list", "HEAD"],
         cwd=root,
         check=True,
         capture_output=True,
