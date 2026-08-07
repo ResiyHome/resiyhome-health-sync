@@ -2,6 +2,29 @@
 
 All notable public changes to Health Sync by ResiyHome are recorded here.
 
+## 1.1.0-beta.2 - 2026-08-06
+
+### Fixed
+
+- Corrected the Total calories burned today daily-rollup request so its page
+  count remains within Google's maximum query-duration validation.
+- Added a bounded historical Height lookup when no measurement exists in the
+  normal body-history window. This retrieves the latest sparse measurement
+  without extending every body-metric backfill request.
+- Restricted the public-history privacy scanner to commits reachable from the
+  checked-out release branch. Unrelated local branches no longer block a clean
+  release, while the full patch, path, blob, credential, identity, and PNG
+  checks remain active for release history.
+
+### Upgrade And Test
+
+- Install the beta completely through HACS, then restart Home Assistant once.
+- Enable the disabled-by-default Total calories burned today and Height entities
+  if needed, run the Health Sync refresh action, and verify their live Google
+  values before this beta is promoted.
+- Existing entity IDs, normalized history, configuration entries, and OAuth
+  authorization are preserved.
+
 ## 1.1.0-beta.1 - 2026-08-06
 
 ### Added

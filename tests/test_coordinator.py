@@ -309,6 +309,8 @@ class FakeClient:
         self.paired_devices: list[dict[str, object]] = []
         self.paired_device_failure: Exception | None = None
         self.paired_device_calls = 0
+        self.all_height: list[dict] = []
+        self.all_height_calls = 0
         self.backfill_gate: asyncio.Event | None = None
         self.scope_grant = validate_granted_scopes(BASE_SCOPES, {})
 
@@ -337,6 +339,13 @@ class FakeClient:
             raise failure
         stream = self.all_sources if source_family == "all-sources" else self.wearables
         return stream.get(data_type, [])
+
+    async def async_reconcile_all_height_data_points(self) -> list[dict]:
+        self.all_height_calls += 1
+        failure = self.failures.get(("all-history", "height"))
+        if failure is not None:
+            raise failure
+        return self.all_height
 
     async def async_daily_rollup_data_points(
         self,
@@ -1418,6 +1427,33 @@ async def test_body_measurements_are_requested_and_surfaced_together(
     assert snapshot.latest_body_fat_at == now.date()
     assert snapshot.latest_height_m == 1.778
     assert snapshot.latest_height_at == now.date()
+
+
+async def test_old_height_sample_is_imported_without_widening_daily_backfill(
+    hass, client: FakeClient, now: datetime
+) -> None:
+    """A sparse height record older than 90 days remains available as a snapshot."""
+    measured_day = now.date() - timedelta(days=400)
+    client.all_height = [_height(measured_day, 1778.0)]
+    store = FakeStore(body_measurements_enabled=True)
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        store,
+        now=lambda: now,
+        include_body_measurements=True,
+    )
+
+    first = await coordinator.async_manual_refresh()
+    second = await coordinator.async_refresh_current()
+
+    assert first.current_day.expanded.height_m is None
+    assert first.latest_height_m == 1.778
+    assert first.latest_height_at == measured_day
+    assert store.rows[measured_day].expanded.height_m == 1.778
+    assert second.latest_height_m == 1.778
+    assert second.latest_height_at == measured_day
+    assert client.all_height_calls == 1
 
 
 async def test_body_measurements_backfill_requests_stay_within_ninety_days(

@@ -29,6 +29,7 @@ from .const import MANUAL_REFRESH_COOLDOWN, SCAN_INTERVAL
 from .expanded_metrics import (
     normalize_expanded_day,
     normalize_hydration_ml,
+    normalize_latest_height,
     normalize_nutrition_energy,
 )
 from .models import (
@@ -254,6 +255,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         self._last_sleep_diagnostic: tuple[object, ...] | None = None
         self._last_fetch_diagnostic: tuple[object, ...] | None = None
         self._last_expanded_diagnostic: tuple[object, ...] | None = None
+        self._height_history_checked = False
 
     @property
     def data_types(self) -> tuple[str, ...]:
@@ -675,7 +677,46 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
             current,
             frozenset(_BODY_MEASUREMENT_TYPES).difference(successful_body_types),
         )
+        await self._async_import_historical_height(now)
         return self.data
+
+    async def _async_import_historical_height(self, now: datetime) -> None:
+        """Import one sparse height snapshot when daily history has none."""
+        if (
+            not self._include_body_measurements
+            or self.data.latest_height_m is not None
+            or self._height_history_checked
+        ):
+            return
+        try:
+            points = await self.client.async_reconcile_all_height_data_points()
+        except AuthenticationError:
+            raise
+        except UpdateFailed:
+            return
+        self._height_history_checked = True
+        latest = normalize_latest_height(points)
+        if latest is None:
+            return
+
+        measured_day, height_m = latest
+        previous_rows = await self.history.async_query(measured_day, measured_day)
+        previous = previous_rows[0] if previous_rows else None
+        expanded = replace(
+            previous.expanded if previous is not None else ExpandedDailyMetrics(),
+            height_m=height_m,
+        )
+        summary = (
+            replace(previous, expanded=expanded, updated_at=now)
+            if previous is not None
+            else DailySummary(
+                date=measured_day,
+                expanded=expanded,
+                updated_at=now,
+            )
+        )
+        await self.history.async_upsert(summary)
+        self._apply_latest_body_measurements(summary, frozenset({"height"}))
 
     async def _async_fetch_nutrition_current(
         self,

@@ -36,6 +36,9 @@ from custom_components.resiyhome_health_sync.const import (
 STEPS_URL = f"{HEALTH_API_BASE_URL}/users/me/dataTypes/steps/dataPoints"
 PAIRED_DEVICES_URL = f"{HEALTH_API_BASE_URL}/users/me/pairedDevices"
 RECONCILE_STEPS_URL = f"{STEPS_URL}:reconcile"
+RECONCILE_HEIGHT_URL = (
+    f"{HEALTH_API_BASE_URL}/users/me/dataTypes/height/dataPoints:reconcile"
+)
 DAILY_ROLLUP_ACTIVE_ZONE_MINUTES_URL = (
     f"{HEALTH_API_BASE_URL}/users/me/dataTypes/active-zone-minutes/dataPoints:dailyRollUp"
 )
@@ -567,6 +570,35 @@ async def test_reconcile_uses_source_family_time_range_and_data_type_page_size(
     assert [call[0].lower() for call in aioclient_mock.mock_calls] == ["get"]
 
 
+async def test_reconcile_all_height_points_omits_the_time_filter(
+    client, aioclient_mock
+) -> None:
+    """Sparse height history can be discovered without widening daily backfill."""
+    expected_params = {
+        "pageSize": 10000,
+        "dataSourceFamily": "users/me/dataSourceFamilies/all-sources",
+    }
+    height_point = {
+        "height": {
+            "sampleTime": {
+                "physicalTime": "2039-07-12T12:00:00Z",
+                "utcOffset": "0s",
+            },
+            "heightMillimeters": "1778",
+        }
+    }
+    aioclient_mock.get(
+        RECONCILE_HEIGHT_URL,
+        params=expected_params,
+        json={"dataPoints": [height_point]},
+    )
+
+    result = await client.async_reconcile_all_height_data_points()
+
+    assert result == [height_point]
+    assert [call[0].lower() for call in aioclient_mock.mock_calls] == ["get"]
+
+
 @pytest.mark.parametrize(
     ("data_type", "start", "end", "expected"),
     [
@@ -753,6 +785,9 @@ async def test_data_type_operations_reject_unsupported_endpoint_methods(client) 
     assert get_data_type_operations("calories-in-heart-rate-zone") == frozenset(
         {"rollup", "daily_rollup"}
     )
+    assert get_data_type_operations("height") == frozenset(
+        {"list", "get", "reconcile"}
+    )
 
     with pytest.raises(ValueError, match="does not support list"):
         await client.async_list_data_points("floors", start=RAW_START, end=RAW_END)
@@ -881,7 +916,7 @@ async def test_daily_rollup_posts_the_civil_range_and_paginates(client, aioclien
             "end": {"date": {"year": 2042, "month": 7, "day": 14}},
         },
         "windowSizeDays": 1,
-        "pageSize": 10000,
+        "pageSize": 1,
         "dataSourceFamily": "users/me/dataSourceFamilies/all-sources",
     }
     responses = iter(
@@ -959,7 +994,7 @@ async def test_total_calories_daily_rollup_preserves_zero_and_positive_values(
             "end": {"date": {"year": 2042, "month": 7, "day": 14}},
         },
         "windowSizeDays": 1,
-        "pageSize": 10000,
+        "pageSize": 2,
         "dataSourceFamily": "users/me/dataSourceFamilies/all-sources",
     }
 

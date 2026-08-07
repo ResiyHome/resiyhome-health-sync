@@ -82,6 +82,32 @@ def normalize_expanded_day(
     )
 
 
+def normalize_latest_height(
+    points: Sequence[DataPoint],
+) -> tuple[date, float] | None:
+    """Return the latest valid height and its independently recorded local date."""
+    latest: tuple[datetime, date, float] | None = None
+    for point in points:
+        mapped = _mapping(point)
+        payload = _mapping(mapped.get("height")) if mapped is not None else None
+        sample_time = (
+            _sample_timestamp(payload.get("sampleTime"))
+            if payload is not None
+            else None
+        )
+        value = (
+            _height_meters(payload.get("heightMillimeters"))
+            if payload is not None
+            else None
+        )
+        if sample_time is None or value is None:
+            continue
+        timestamp, local_date = sample_time
+        if latest is None or timestamp > latest[0]:
+            latest = timestamp, local_date, value
+    return (latest[1], latest[2]) if latest is not None else None
+
+
 def normalize_nutrition_energy(
     points: Sequence[DataPoint], day: date
 ) -> float | None:

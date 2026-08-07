@@ -338,6 +338,22 @@ def test_changelog_documents_optional_health_capabilities_beta_release() -> None
         assert phrase in beta_release
 
 
+def test_changelog_documents_beta_two_data_fixes() -> None:
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert changelog.index("## 1.1.0-beta.2") < changelog.index("## 1.1.0-beta.1")
+    beta_release = changelog.split("## 1.1.0-beta.2", maxsplit=1)[1].split(
+        "## 1.1.0-beta.1", maxsplit=1
+    )[0]
+    for phrase in (
+        "Total calories burned today",
+        "historical Height",
+        "release branch",
+        "restart Home Assistant once",
+    ):
+        assert phrase in beta_release
+
+
 def test_fixture_provenance_is_documented() -> None:
     provenance = (ROOT / "tests" / "fixtures" / "README.md").read_text(encoding="utf-8")
     normalized = " ".join(provenance.split())
@@ -441,7 +457,7 @@ def test_manifest_versions_official_integration_parity_beta_release() -> None:
         )
     )
 
-    assert manifest["version"] == "1.1.0-beta.1"
+    assert manifest["version"] == "1.1.0-beta.2"
 
 
 def test_gitignore_blocks_credential_artifacts() -> None:

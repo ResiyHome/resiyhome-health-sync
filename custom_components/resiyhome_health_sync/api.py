@@ -27,6 +27,7 @@ MAX_PAGINATION_RESULTS = 1_000_000
 
 type DataTypeOperation = Literal["list", "get", "reconcile", "rollup", "daily_rollup"]
 _LIST_RECONCILE = frozenset({"list", "reconcile"})
+_LIST_GET_RECONCILE = frozenset({"list", "get", "reconcile"})
 _LIST_RECONCILE_ROLLUPS = frozenset(
     {"list", "reconcile", "rollup", "daily_rollup"}
 )
@@ -100,7 +101,7 @@ _DATA_TYPE_SPECS: dict[str, _DataTypeSpec] = {
     "height": _DataTypeSpec(
         "height.sample_time.physical_time",
         "physical",
-        operations=_LIST_RECONCILE_ROLLUPS,
+        operations=_LIST_GET_RECONCILE,
     ),
     "hydration-log": _DataTypeSpec(
         "hydration_log.interval.civil_start_time",
@@ -289,6 +290,16 @@ class GoogleHealthClient:
             f"users/me/dataTypes/{data_type}/dataPoints:reconcile", params
         )
 
+    async def async_reconcile_all_height_data_points(self) -> list[dict[str, Any]]:
+        """Read sparse height history without expanding daily metric backfill."""
+        return await self._async_paginated_get(
+            "users/me/dataTypes/height/dataPoints:reconcile",
+            {
+                "pageSize": _DATA_TYPE_SPECS["height"].page_size,
+                "dataSourceFamily": "users/me/dataSourceFamilies/all-sources",
+            },
+        )
+
     async def async_daily_rollup_data_points(
         self,
         data_type: str,
@@ -304,10 +315,11 @@ class GoogleHealthClient:
                 f"Google Health data type {data_type} does not support daily rollup"
             )
         _validate_daily_rollup_range(data_type, start, end)
+        requested_days = (end.date() - start.date()).days
         body: dict[str, object] = {
             "range": {"start": _civil_date(start), "end": _civil_date(end)},
             "windowSizeDays": 1,
-            "pageSize": spec.page_size,
+            "pageSize": min(spec.page_size, requested_days),
             "dataSourceFamily": f"users/me/dataSourceFamilies/{source_family}",
         }
         return await self._async_paginated_post(
