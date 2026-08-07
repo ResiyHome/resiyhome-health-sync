@@ -69,8 +69,16 @@ disabled. Configure each person independently:
    Water consumed today, and/or `include_paired_devices` for current paired
    trackers and scales.
 4. When Home Assistant starts reauthorization, verify the same person's
-   Google account and approve the requested optional scope.
-5. Repeat these steps separately for each additional person.
+   Google account. If it does not start automatically, select
+   **Reauthenticate** on that existing entry.
+5. On Google's consent screen, approve Google Health nutrition access
+   (`https://www.googleapis.com/auth/googlehealth.nutrition.readonly`) for
+   `include_nutrition` and/or Google Health settings access
+   (`https://www.googleapis.com/auth/googlehealth.settings.readonly`) for
+   paired devices.
+6. Return to Home Assistant and run the Health Sync refresh action or wait for
+   the next 15-minute poll.
+7. Repeat these steps separately for each additional person.
 
 Declining an optional permission leaves baseline sensors working. The
 optional entities remain unavailable until both their per-person option and
@@ -93,6 +101,10 @@ config entries, entity identities, and normalized history are reused.
 Baseline sensors continue without reauthorization. Follow the optional
 capability steps above separately for each person who chooses to enable new
 permissions.
+
+Do not remove and re-add an existing person to obtain nutrition permission.
+Configure and reauthenticate the same entry so its entity IDs, normalized
+history, and Home Assistant Recorder history remain attached.
 
 The derived slug supplies stable entity unique IDs and service and action
 targeting within an existing config entry. The normalized history store is

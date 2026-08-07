@@ -25,12 +25,23 @@ For each person who wants a new optional capability:
 1. Open that person's Health Sync options.
 2. Enable `include_nutrition`, `include_paired_devices`, or both.
 3. Complete Google reauthorization for that same person.
-4. Verify the same Google account is active before consent.
-5. Confirm the optional entities populate after a successful refresh.
+4. Select **Reauthenticate** on that existing entry and verify the same Google
+   account is active before consent.
+5. For nutrition, approve Google Health nutrition access
+   (`https://www.googleapis.com/auth/googlehealth.nutrition.readonly`) on
+   Google's consent screen.
+6. Return to Home Assistant and run the Health Sync refresh action or wait for
+   the next 15-minute poll.
+7. Confirm the optional entities populate after a successful refresh.
 
 Declining an optional permission leaves baseline sensors working. The
 declined capability remains unavailable until that person grants its scope.
 Repeat these steps separately for each household member.
+
+You do not need to create new Home Assistant Application Credentials, rotate
+the OAuth client secret, or delete and recreate a person. Reauthorization
+expands the saved scope grant while preserving the existing config-entry ID,
+entity IDs, normalized history, and Recorder history.
 
 `include_body_measurements` uses the existing baseline
 health-measurements scope, so enabling Weight, Body-fat percentage, and Height

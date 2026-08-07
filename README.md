@@ -128,6 +128,24 @@ Sync options. If the saved authorization lacks the matching optional scope, Home
 starts reauthorization for that same config entry. Declining an optional permission
 leaves baseline sensors working, while the declined capability remains unavailable.
 
+For an existing installation, authorize nutrition without removing the person:
+
+1. Install the current Health Sync release completely through HACS and restart
+   Home Assistant once.
+2. Open **Settings > Devices & services > Health Sync by ResiyHome**.
+3. Open the existing person's entry, select **Configure**, and enable
+   `include_nutrition`.
+4. Complete **Reauthenticate** on that same entry with that same person's
+   Google account.
+5. On Google's consent screen, select the Google Health nutrition permission
+   and continue. The requested scope is
+   `https://www.googleapis.com/auth/googlehealth.nutrition.readonly`.
+6. Run the Health Sync refresh action or wait for the next 15-minute poll.
+
+Repeat these steps for each person who wants nutrition values. Do not delete
+and recreate an entry to add the scope; reauthorization preserves its entity
+identity and normalized history.
+
 Nutrition adds Calories consumed today and Water consumed today from Google's
 `nutrition-log` and `hydration-log` all-source results for the current local day.
 Nutrition has no historical backfill in this release. Daily normalized nutrition begins

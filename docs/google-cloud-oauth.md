@@ -116,6 +116,24 @@ requested optional scope. Complete consent using the same person's Google
 account and the same config entry. Do not delete, re-add, or duplicate the
 entry.
 
+For nutrition specifically:
+
+1. Open **Settings > Devices & services > Health Sync by ResiyHome**.
+2. Open the existing person's entry and select **Configure**.
+3. Enable `include_nutrition` and submit the options.
+4. Complete **Reauthenticate** for that same entry. If Home Assistant does not
+   open it automatically, select the entry's reauthentication action.
+5. Verify the intended Google account before continuing.
+6. On Google's consent screen, approve Google Health nutrition access. The
+   resulting authorization must contain
+   `https://www.googleapis.com/auth/googlehealth.nutrition.readonly`.
+7. Return to Home Assistant and run the Health Sync refresh action or wait for
+   the next 15-minute poll.
+
+Application Credentials do not need a new client ID or secret for this
+upgrade. Reauthorization expands the saved grant for the existing OAuth client
+and person entry.
+
 If an optional permission is declined, baseline sensors continue. The
 declined capability remains unavailable until the option is enabled and the
 matching scope is granted in a later reauthorization.

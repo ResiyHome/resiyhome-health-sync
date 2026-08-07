@@ -55,6 +55,20 @@ complete three-scope baseline. Declining an optional permission leaves
 baseline sensors working; the optional capability remains unavailable. Never
 delete or re-add the integration to repair consent.
 
+If Calories consumed today or Water consumed today remains unavailable:
+
+1. Open the existing person's Health Sync options and confirm
+   `include_nutrition` is enabled.
+2. Select **Reauthenticate** on that same entry.
+3. Verify the intended Google account and approve Google Health nutrition
+   access on the consent screen.
+4. Return to Home Assistant and run the Health Sync refresh action or wait for
+   the next 15-minute poll.
+
+The saved grant must include
+`https://www.googleapis.com/auth/googlehealth.nutrition.readonly`. A new OAuth
+client, integration entry, or person name is not required.
+
 ## Entities are unavailable
 
 Unavailable is different from zero. A valid provider zero remains zero; unavailable means

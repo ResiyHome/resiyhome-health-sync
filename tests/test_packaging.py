@@ -354,6 +354,25 @@ def test_changelog_documents_beta_two_data_fixes() -> None:
         assert phrase in beta_release
 
 
+def test_changelog_documents_stable_official_integration_parity_release() -> None:
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert changelog.index("## 1.1.0 -") < changelog.index("## 1.1.0-beta.2")
+    release = changelog.split("## 1.1.0 -", maxsplit=1)[1].split(
+        "## 1.1.0-beta.2", maxsplit=1
+    )[0]
+    for phrase in (
+        "Total calories burned today",
+        "Body-fat percentage",
+        "Water consumed today",
+        "googlehealth.nutrition.readonly",
+        "Reauthenticate",
+        "Do not delete or re-add",
+        "existing entity IDs",
+    ):
+        assert phrase in release
+
+
 def test_fixture_provenance_is_documented() -> None:
     provenance = (ROOT / "tests" / "fixtures" / "README.md").read_text(encoding="utf-8")
     normalized = " ".join(provenance.split())
@@ -450,14 +469,14 @@ def test_readme_documents_exactly_one_post_download_restart() -> None:
     )
 
 
-def test_manifest_versions_official_integration_parity_beta_release() -> None:
+def test_manifest_versions_official_integration_parity_release() -> None:
     manifest = json.loads(
         (ROOT / "custom_components" / "resiyhome_health_sync" / "manifest.json").read_text(
             encoding="utf-8"
         )
     )
 
-    assert manifest["version"] == "1.1.0-beta.2"
+    assert manifest["version"] == "1.1.0"
 
 
 def test_gitignore_blocks_credential_artifacts() -> None:
