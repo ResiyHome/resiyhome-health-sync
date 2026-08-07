@@ -116,6 +116,15 @@ Extend `ExpandedDailyMetrics` with:
 
 Continue using the existing `daily_vo2_max` fields unchanged.
 
+### Latest workout selection
+
+Add `latest_workout: WorkoutSummary | None` to `CoordinatorSnapshot`. Rebuild
+it from the newest valid workout across loaded normalized history and the
+current refresh. The existing `last_workout_type` and `last_workout_duration`
+entities and every new last-workout entity use this same selected object.
+Crossing midnight therefore does not make the last workout unavailable merely
+because no new workout occurred today.
+
 ### Sleep efficiency
 
 Add `sleep_efficiency_percentage: float | None` to `DailySummary`.
@@ -264,9 +273,13 @@ The v3-to-v4 migration:
 1. Retains every existing top-level row and scalar value.
 2. Adds absent expanded fields with empty or unavailable defaults.
 3. Extends each workout with optional detail fields and empty detail tuples.
-4. Adds a separate recent-workout-enrichment cursor and completion flag.
-5. Validates the migrated object before the first v4 write.
-6. Writes transactionally and reads the result back before declaring migration
+4. Resets only `expanded_backfill_cursor` to `None` so the existing bounded
+   90-day expanded pass can populate the new activity, VO2, elevation, and
+   swimming fields without rewinding the 20-year core cursor.
+5. Adds a separate recent-workout-enrichment cursor. Completion is derived in
+   the coordinator when the cursor reaches the fixed 30-day boundary.
+6. Validates the migrated object before the first v4 write.
+7. Writes transactionally and reads the result back before declaring migration
    success.
 
 Malformed legacy data fails closed without partially rewriting the store.
@@ -359,4 +372,3 @@ Version 1.2.0 is ready for beta only when:
   enabled
 - live testing confirms at least one real workout summary and verifies graceful
   unavailability for data Google does not supply
-
