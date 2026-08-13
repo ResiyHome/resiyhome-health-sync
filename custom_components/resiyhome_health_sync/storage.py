@@ -3,17 +3,19 @@
 import asyncio
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import date, datetime
 from math import isfinite
 from pathlib import Path
+from time import perf_counter
 from typing import cast
 
 from homeassistant.core import CoreState, Event, HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .models import DailySummary, ExpandedDailyMetrics, SourceKind, WorkoutSummary
+from .performance import record_storage_read, record_storage_write
 
 _LOGGER = logging.getLogger(__name__)
 _STORE_VERSION = 1
@@ -103,6 +105,29 @@ _SLEEP_RESPIRATORY_TYPES = frozenset({"deep", "light", "rem", "full"})
 _CARDIO_FITNESS_LEVELS = frozenset(
     {"POOR", "FAIR", "AVERAGE", "GOOD", "VERY_GOOD", "EXCELLENT"}
 )
+
+
+def _storage_timer_start() -> float | None:
+    """Start optional storage timing without affecting the storage operation."""
+    try:
+        return perf_counter()
+    except Exception:
+        return None
+
+
+def _record_storage_elapsed(
+    started: float | None,
+    record: Callable[[object], None],
+) -> None:
+    """Report optional storage timing without masking storage or cancellation errors."""
+    if started is None:
+        return
+    try:
+        record(perf_counter() - started)
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
 
 
 class HistoryStoreError(ValueError):
@@ -315,56 +340,74 @@ class HealthHistoryStore:
 
     async def async_upsert(self, summary: DailySummary) -> None:
         """Replace one date and batch the normal history write."""
-        async with self._lock:
-            await self._async_ensure_loaded_locked()
-            _serialize_summary(summary)
-            self._summaries[summary.date] = summary
-            snapshot = self._serialize_document_for(
-                self._backfill_cursor, self._expanded_backfill_cursor
-            )
-            self._store.async_delay_save(lambda: snapshot, _SAVE_DELAY_SECONDS)
+        started = _storage_timer_start()
+        try:
+            async with self._lock:
+                await self._async_ensure_loaded_locked()
+                _serialize_summary(summary)
+                self._summaries[summary.date] = summary
+                snapshot = self._serialize_document_for(
+                    self._backfill_cursor, self._expanded_backfill_cursor
+                )
+                self._store.async_delay_save(lambda: snapshot, _SAVE_DELAY_SECONDS)
+        finally:
+            _record_storage_elapsed(started, record_storage_write)
 
     async def async_query(self, start: date, end: date) -> list[DailySummary]:
         """Return summaries in chronological order, including both date bounds."""
-        if type(start) is not date or type(end) is not date:
-            raise TypeError("start and end must be date values")
-        if start > end:
-            raise ValueError("start must be on or before end")
-        async with self._lock:
-            await self._async_ensure_loaded_locked()
-            return [
-                summary for day, summary in sorted(self._summaries.items()) if start <= day <= end
-            ]
+        started = _storage_timer_start()
+        try:
+            if type(start) is not date or type(end) is not date:
+                raise TypeError("start and end must be date values")
+            if start > end:
+                raise ValueError("start must be on or before end")
+            async with self._lock:
+                await self._async_ensure_loaded_locked()
+                return [
+                    summary
+                    for day, summary in sorted(self._summaries.items())
+                    if start <= day <= end
+                ]
+        finally:
+            _record_storage_elapsed(started, record_storage_read)
 
     async def async_set_backfill_checkpoint(self, cursor: date | None) -> None:
         """Durably save a completed backfill checkpoint boundary."""
-        if cursor is not None and type(cursor) is not date:
-            raise TypeError("backfill cursor must be a date or None")
-        async with self._lock:
-            await self._async_ensure_loaded_locked()
-            document = self._serialize_document_for(cursor, self._expanded_backfill_cursor)
-            await self._store.async_save(document)
-            self._backfill_cursor = cursor
+        started = _storage_timer_start()
+        try:
+            if cursor is not None and type(cursor) is not date:
+                raise TypeError("backfill cursor must be a date or None")
+            async with self._lock:
+                await self._async_ensure_loaded_locked()
+                document = self._serialize_document_for(cursor, self._expanded_backfill_cursor)
+                await self._store.async_save(document)
+                self._backfill_cursor = cursor
+        finally:
+            _record_storage_elapsed(started, record_storage_write)
 
     async def async_checkpoint_expanded(
         self, summary: DailySummary, next_cursor: date | None
     ) -> None:
         """Durably save one expanded summary and its independent checkpoint together."""
-        if next_cursor is not None and type(next_cursor) is not date:
-            raise TypeError("expanded backfill cursor must be a date or None")
-        _serialize_summary(summary)
-        async with self._lock:
-            await self._async_ensure_loaded_locked()
-            updated_summaries = self._summaries | {summary.date: summary}
-            document = _serialize_document(
-                updated_summaries,
-                self._backfill_cursor,
-                next_cursor,
-                self._body_measurements_enabled,
-            )
-            await self._store.async_save(document)
-            self._summaries = updated_summaries
-            self._expanded_backfill_cursor = next_cursor
+        started = _storage_timer_start()
+        try:
+            if next_cursor is not None and type(next_cursor) is not date:
+                raise TypeError("expanded backfill cursor must be a date or None")
+            _serialize_summary(summary)
+            async with self._lock:
+                await self._async_ensure_loaded_locked()
+                updated_summaries = self._summaries | {summary.date: summary}
+                document = _serialize_document(
+                    updated_summaries,
+                    self._backfill_cursor,
+                    next_cursor,
+                    self._body_measurements_enabled,
+                )
+                await self._store.async_save(document)
+                self._summaries = updated_summaries
+                self._expanded_backfill_cursor = next_cursor
+        finally:
+            _record_storage_elapsed(started, record_storage_write)
 
     async def async_apply_body_measurement_option(
         self, enabled: bool, today: date
