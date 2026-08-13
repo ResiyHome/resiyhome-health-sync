@@ -27,6 +27,16 @@ MAX_PAIRED_DEVICE_PAGES = 20
 MAX_PAGINATION_PAGES = 100
 MAX_PAGINATION_RESULTS = 1_000_000
 
+
+def _record_google_request_best_effort(started_at: float | None) -> None:
+    """Record one transport duration without affecting the API request."""
+    if started_at is None:
+        return
+    try:
+        record_google_request(perf_counter() - started_at)
+    except Exception:
+        pass
+
 type DataTypeOperation = Literal["list", "get", "reconcile", "rollup", "daily_rollup"]
 _LIST_RECONCILE = frozenset({"list", "reconcile"})
 _LIST_GET_RECONCILE = frozenset({"list", "get", "reconcile"})
@@ -507,37 +517,41 @@ class GoogleHealthClient:
         """Make one GET request, refreshing credentials once after a 401."""
         for has_refreshed in (False, True):
             failure_message: str | None = None
-            request_started = perf_counter()
             try:
                 async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
-                    async with self._session.get(
-                        url,
-                        params=params,
-                        headers={
-                            "Accept": "application/json",
-                            "Authorization": f"Bearer {self._token_state.access_token}",
-                        },
-                    ) as response:
-                        if response.status == 401:
-                            if has_refreshed:
-                                raise AuthenticationError(
-                                    "Google Health credentials require reauthentication"
-                                )
-                        elif response.status == 429 or response.status >= 500:
-                            raise UpdateFailed("Google Health is temporarily unavailable")
-                        elif response.status >= 400:
-                            raise UpdateFailed("Google Health rejected the data request")
-                        else:
-                            payload = await response.json()
-                            if not isinstance(payload, dict):
-                                raise UpdateFailed("Google Health returned an invalid response")
-                            return payload
+                    try:
+                        request_started = perf_counter()
+                    except Exception:
+                        request_started = None
+                    try:
+                        async with self._session.get(
+                            url,
+                            params=params,
+                            headers={
+                                "Accept": "application/json",
+                                "Authorization": f"Bearer {self._token_state.access_token}",
+                            },
+                        ) as response:
+                            if response.status == 401:
+                                if has_refreshed:
+                                    raise AuthenticationError(
+                                        "Google Health credentials require reauthentication"
+                                    )
+                            elif response.status == 429 or response.status >= 500:
+                                raise UpdateFailed("Google Health is temporarily unavailable")
+                            elif response.status >= 400:
+                                raise UpdateFailed("Google Health rejected the data request")
+                            else:
+                                payload = await response.json()
+                                if not isinstance(payload, dict):
+                                    raise UpdateFailed("Google Health returned an invalid response")
+                                return payload
+                    finally:
+                        _record_google_request_best_effort(request_started)
             except (ClientError, TimeoutError):
                 failure_message = "Google Health request failed"
             except (TypeError, ValueError):
                 failure_message = "Google Health returned an invalid response"
-            finally:
-                record_google_request(perf_counter() - request_started)
 
             if failure_message is not None:
                 raise UpdateFailed(failure_message)
@@ -550,37 +564,41 @@ class GoogleHealthClient:
         """Make one POST request, refreshing credentials once after a 401."""
         for has_refreshed in (False, True):
             failure_message: str | None = None
-            request_started = perf_counter()
             try:
                 async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
-                    async with self._session.post(
-                        url,
-                        json=body,
-                        headers={
-                            "Accept": "application/json",
-                            "Authorization": f"Bearer {self._token_state.access_token}",
-                        },
-                    ) as response:
-                        if response.status == 401:
-                            if has_refreshed:
-                                raise AuthenticationError(
-                                    "Google Health credentials require reauthentication"
-                                )
-                        elif response.status == 429 or response.status >= 500:
-                            raise UpdateFailed("Google Health is temporarily unavailable")
-                        elif response.status >= 400:
-                            raise UpdateFailed("Google Health rejected the data request")
-                        else:
-                            payload = await response.json()
-                            if not isinstance(payload, dict):
-                                raise UpdateFailed("Google Health returned an invalid response")
-                            return payload
+                    try:
+                        request_started = perf_counter()
+                    except Exception:
+                        request_started = None
+                    try:
+                        async with self._session.post(
+                            url,
+                            json=body,
+                            headers={
+                                "Accept": "application/json",
+                                "Authorization": f"Bearer {self._token_state.access_token}",
+                            },
+                        ) as response:
+                            if response.status == 401:
+                                if has_refreshed:
+                                    raise AuthenticationError(
+                                        "Google Health credentials require reauthentication"
+                                    )
+                            elif response.status == 429 or response.status >= 500:
+                                raise UpdateFailed("Google Health is temporarily unavailable")
+                            elif response.status >= 400:
+                                raise UpdateFailed("Google Health rejected the data request")
+                            else:
+                                payload = await response.json()
+                                if not isinstance(payload, dict):
+                                    raise UpdateFailed("Google Health returned an invalid response")
+                                return payload
+                    finally:
+                        _record_google_request_best_effort(request_started)
             except (ClientError, TimeoutError):
                 failure_message = "Google Health request failed"
             except (TypeError, ValueError):
                 failure_message = "Google Health returned an invalid response"
-            finally:
-                record_google_request(perf_counter() - request_started)
 
             if failure_message is not None:
                 raise UpdateFailed(failure_message)

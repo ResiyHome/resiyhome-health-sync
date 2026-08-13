@@ -343,6 +343,221 @@ async def test_successful_post_records_one_transport_attempt(
     assert aioclient_mock.call_count == 1
 
 
+async def test_failed_get_records_one_transport_attempt_and_preserves_error(
+    client, aioclient_mock
+) -> None:
+    """A failed data GET records one attempt and keeps its public error unchanged."""
+    aioclient_mock.get(STEPS_URL, status=500)
+    recorder = PerformanceRecorder()
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=("core_activity",),
+        started_at=RAW_START,
+    )
+    token = operation.activate()
+    try:
+        with pytest.raises(UpdateFailed) as raised:
+            await client._async_get_json(STEPS_URL, {})
+    finally:
+        operation.finish("temporary_error")
+        operation.deactivate(token)
+
+    assert str(raised.value) == "Google Health is temporarily unavailable"
+    assert recorder.snapshot()[0].google_request_count == 1
+    assert aioclient_mock.call_count == 1
+
+
+async def test_failed_post_records_one_transport_attempt_and_preserves_error(
+    client, aioclient_mock
+) -> None:
+    """A failed data POST records one attempt and keeps its public error unchanged."""
+    body = {"range": {"start": "2042-07-12", "end": "2042-07-13"}}
+    aioclient_mock.post(DAILY_ROLLUP_TOTAL_CALORIES_URL, status=500)
+    recorder = PerformanceRecorder()
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=("core_activity",),
+        started_at=RAW_START,
+    )
+    token = operation.activate()
+    try:
+        with pytest.raises(UpdateFailed) as raised:
+            await client._async_post_json(DAILY_ROLLUP_TOTAL_CALORIES_URL, body)
+    finally:
+        operation.finish("temporary_error")
+        operation.deactivate(token)
+
+    assert str(raised.value) == "Google Health is temporarily unavailable"
+    assert recorder.snapshot()[0].google_request_count == 1
+    assert aioclient_mock.call_count == 1
+
+
+async def test_unauthorized_post_refresh_success_records_two_transport_attempts(
+    client, aioclient_mock, token_update_callback, monkeypatch
+) -> None:
+    """A POST 401 retry records both data attempts and excludes the token POST."""
+    body = {"range": {"start": "2042-07-12", "end": "2042-07-13"}}
+    responses = iter(
+        (
+            AiohttpClientMockResponse(
+                "post", URL(DAILY_ROLLUP_TOTAL_CALORIES_URL), status=401
+            ),
+            AiohttpClientMockResponse(
+                "post",
+                URL(DAILY_ROLLUP_TOTAL_CALORIES_URL),
+                json={"rollupDataPoints": []},
+            ),
+        )
+    )
+
+    async def post_response(*_args: Any) -> AiohttpClientMockResponse:
+        return next(responses)
+
+    aioclient_mock.post(DAILY_ROLLUP_TOTAL_CALORIES_URL, side_effect=post_response)
+    aioclient_mock.post(TOKEN_URL, json=VALID_REFRESH_RESPONSE)
+    durations = iter((40.0, 40.1, 40.2, 40.35))
+    monkeypatch.setattr(api_module, "perf_counter", durations.__next__, raising=False)
+    recorder = PerformanceRecorder()
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=("core_activity",),
+        started_at=RAW_START,
+    )
+    token = operation.activate()
+    try:
+        assert await client._async_post_json(DAILY_ROLLUP_TOTAL_CALORIES_URL, body) == {
+            "rollupDataPoints": []
+        }
+    finally:
+        operation.finish("success")
+        operation.deactivate(token)
+
+    record = recorder.snapshot()[0]
+    assert record.google_request_count == 2
+    assert record.google_request_duration_ms == 250
+    assert [call[1] for call in aioclient_mock.mock_calls] == [
+        URL(DAILY_ROLLUP_TOTAL_CALORIES_URL),
+        URL(TOKEN_URL),
+        URL(DAILY_ROLLUP_TOTAL_CALORIES_URL),
+    ]
+    token_update_callback.assert_awaited_once()
+
+
+@pytest.mark.parametrize("failure_call", [1, 2])
+async def test_timing_failures_do_not_change_successful_get_attempt_behavior(
+    client, aioclient_mock, monkeypatch, failure_call: int
+) -> None:
+    """Clock failure before or after a GET cannot change its result or call count."""
+    aioclient_mock.get(STEPS_URL, json={"dataPoints": []})
+    clock_calls = 0
+
+    def failing_clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls == failure_call:
+            raise RuntimeError("telemetry clock failed")
+        return 50.0 + clock_calls
+
+    monkeypatch.setattr(api_module, "perf_counter", failing_clock)
+    recorder = PerformanceRecorder()
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=("core_activity",),
+        started_at=RAW_START,
+    )
+    token = operation.activate()
+    try:
+        assert await client._async_get_json(STEPS_URL, {}) == {"dataPoints": []}
+    finally:
+        operation.finish("success")
+        operation.deactivate(token)
+
+    assert clock_calls == failure_call
+    assert recorder.snapshot()[0].google_request_count == 0
+    assert aioclient_mock.call_count == 1
+
+
+async def test_recorder_failure_does_not_mask_failed_get_attempt_error(
+    client, aioclient_mock, monkeypatch
+) -> None:
+    """A recorder failure cannot replace the data request's existing error."""
+    aioclient_mock.get(STEPS_URL, status=500)
+
+    def failing_recorder(_duration: float) -> None:
+        raise RuntimeError("telemetry recorder failed")
+
+    monkeypatch.setattr(api_module, "record_google_request", failing_recorder)
+    recorder = PerformanceRecorder()
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=("core_activity",),
+        started_at=RAW_START,
+    )
+    token = operation.activate()
+    try:
+        with pytest.raises(UpdateFailed) as raised:
+            await client._async_get_json(STEPS_URL, {})
+    finally:
+        operation.finish("temporary_error")
+        operation.deactivate(token)
+
+    assert str(raised.value) == "Google Health is temporarily unavailable"
+    assert aioclient_mock.call_count == 1
+
+
+@pytest.mark.parametrize("method", ["get", "post"])
+async def test_timeout_setup_failure_does_not_count_transport_attempt(
+    client, aioclient_mock, monkeypatch, method: str
+) -> None:
+    """A timeout setup failure happens before timing and the session method."""
+
+    class FailingTimeout:
+        async def __aenter__(self) -> None:
+            raise RuntimeError("timeout setup failed")
+
+        async def __aexit__(self, *_args: object) -> bool:
+            return False
+
+    clock_calls = 0
+
+    def clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        return 60.0
+
+    monkeypatch.setattr(api_module.asyncio, "timeout", lambda _seconds: FailingTimeout())
+    monkeypatch.setattr(api_module, "perf_counter", clock)
+    recorder = PerformanceRecorder()
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=("core_activity",),
+        started_at=RAW_START,
+    )
+    token = operation.activate()
+    try:
+        with pytest.raises(RuntimeError, match="timeout setup failed"):
+            if method == "get":
+                await client._async_get_json(STEPS_URL, {})
+            else:
+                await client._async_post_json(
+                    DAILY_ROLLUP_TOTAL_CALORIES_URL,
+                    {"range": {"start": "2042-07-12", "end": "2042-07-13"}},
+                )
+    finally:
+        operation.finish("temporary_error")
+        operation.deactivate(token)
+
+    assert clock_calls == 0
+    assert recorder.snapshot()[0].google_request_count == 0
+    assert aioclient_mock.call_count == 0
+
+
 async def test_unauthorized_get_refresh_success_records_two_transport_attempts(
     client, aioclient_mock, token_update_callback, monkeypatch
 ) -> None:
@@ -424,7 +639,19 @@ async def test_list_data_points_paginates_with_get_only(client, aioclient_mock) 
         },
     )
 
-    result = await client.async_list_data_points("steps", start=RAW_START, end=RAW_END)
+    recorder = PerformanceRecorder()
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=("core_activity",),
+        started_at=RAW_START,
+    )
+    token = operation.activate()
+    try:
+        result = await client.async_list_data_points("steps", start=RAW_START, end=RAW_END)
+    finally:
+        operation.finish("success")
+        operation.deactivate(token)
 
     assert result == [{"steps": {"count": "1"}}, {"steps": {"count": "2"}}]
     assert [call[0].lower() for call in aioclient_mock.mock_calls] == ["get", "get"]
@@ -432,6 +659,7 @@ async def test_list_data_points_paginates_with_get_only(client, aioclient_mock) 
         "Accept": "application/json",
         "Authorization": AUTHORIZATION_VALUE,
     }
+    assert recorder.snapshot()[0].google_request_count == 2
 
 
 async def test_list_paired_devices_uses_official_endpoint_and_paginates(
