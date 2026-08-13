@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import FrozenInstanceError
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from math import inf, nan
 
 import pytest
@@ -9,6 +9,7 @@ from custom_components.resiyhome_health_sync.capabilities import CapabilityId
 from custom_components.resiyhome_health_sync.performance import (
     OPERATIONS,
     OUTCOMES,
+    PerformanceOperation,
     PerformanceRecorder,
     record_google_request,
     record_storage_read,
@@ -217,3 +218,87 @@ def test_records_are_frozen_allowlisted_snapshots() -> None:
     assert record.outcome in OUTCOMES
     assert isinstance(record.started_at, datetime)
     assert all(isinstance(capability, CapabilityId) for capability in record.enabled_capabilities)
+
+
+class ExplodingTimezone(tzinfo):
+    def utcoffset(self, value: datetime) -> None:
+        raise RuntimeError("malformed timezone")
+
+
+class ExplodingCapabilities:
+    def __iter__(self):
+        raise RuntimeError("malformed capability iterable")
+
+
+def _finish_without_raising(operation: PerformanceOperation) -> None:
+    token = operation.activate()
+    operation.finish("success")
+    operation.deactivate(token)
+
+
+def test_malformed_started_at_returns_inert_operation() -> None:
+    recorder = PerformanceRecorder()
+    malformed_started_at = datetime(2042, 7, 13, 12, 0, tzinfo=ExplodingTimezone())
+
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=(),
+        started_at=malformed_started_at,
+    )
+
+    assert operation is not None
+    _finish_without_raising(operation)
+    assert recorder.snapshot() == ()
+
+
+def test_capability_iterator_failure_returns_inert_operation() -> None:
+    recorder = PerformanceRecorder()
+
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=ExplodingCapabilities(),
+        started_at=NOW,
+    )
+
+    assert operation is not None
+    _finish_without_raising(operation)
+    assert recorder.snapshot() == ()
+
+
+def test_monotonic_clock_failure_returns_inert_operation() -> None:
+    def failing_monotonic() -> float:
+        raise RuntimeError("clock unavailable")
+
+    recorder = PerformanceRecorder(monotonic=failing_monotonic)
+
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=(),
+        started_at=NOW,
+    )
+
+    assert operation is not None
+    _finish_without_raising(operation)
+    assert recorder.snapshot() == ()
+
+
+def test_operation_construction_failure_returns_inert_operation(monkeypatch) -> None:
+    def failing_init(self, *args, **kwargs) -> None:
+        raise RuntimeError("construction failed")
+
+    monkeypatch.setattr(PerformanceOperation, "__init__", failing_init)
+    recorder = PerformanceRecorder()
+
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=(),
+        started_at=NOW,
+    )
+
+    assert operation is not None
+    _finish_without_raising(operation)
+    assert recorder.snapshot() == ()

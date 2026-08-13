@@ -100,17 +100,14 @@ def _duration_ms(duration_seconds: object) -> int | None:
 
 def _capabilities(values: Iterable[object]) -> tuple[CapabilityId, ...]:
     normalized: set[CapabilityId] = set()
-    try:
-        for value in values:
-            if isinstance(value, CapabilityId):
-                normalized.add(value)
-            elif isinstance(value, str):
-                try:
-                    normalized.add(CapabilityId(value))
-                except ValueError:
-                    continue
-    except Exception:
-        return tuple(sorted(normalized, key=lambda capability: capability.value))
+    for value in values:
+        if isinstance(value, CapabilityId):
+            normalized.add(value)
+        elif isinstance(value, str):
+            try:
+                normalized.add(CapabilityId(value))
+            except ValueError:
+                continue
     return tuple(sorted(normalized, key=lambda capability: capability.value))
 
 
@@ -249,20 +246,19 @@ class PerformanceRecorder:
             return None
         try:
             started_monotonic = float(self._monotonic())
-        except (TypeError, ValueError, OverflowError):
-            started_monotonic = 0.0
-        try:
             active = bool(backfill_active)
+            capabilities = _capabilities(enabled_capabilities)
+            normalized_started_at = _started_at(started_at)
+            return PerformanceOperation(
+                self,
+                operation,
+                backfill_active=active,
+                enabled_capabilities=capabilities,
+                started_at=normalized_started_at,
+                started_monotonic=started_monotonic,
+            )
         except Exception:
-            active = False
-        return PerformanceOperation(
-            self,
-            operation,
-            backfill_active=active,
-            enabled_capabilities=_capabilities(enabled_capabilities),
-            started_at=_started_at(started_at),
-            started_monotonic=started_monotonic,
-        )
+            return _NoOpPerformanceOperation()
 
     def _append(self, record: PerformanceRecord) -> None:
         self._records.append(record)
@@ -270,6 +266,37 @@ class PerformanceRecorder:
     def snapshot(self) -> tuple[PerformanceRecord, ...]:
         """Return immutable references to the bounded record snapshots."""
         return tuple(self._records)
+
+
+class _NoOpPerformanceOperation(PerformanceOperation):
+    """Inert operation returned when telemetry setup itself fails."""
+
+    def __init__(self) -> None:
+        pass
+
+    def activate(self) -> Token[PerformanceOperation | None]:
+        return _ACTIVE_OPERATION.set(None)
+
+    def deactivate(self, token: Token[PerformanceOperation | None]) -> None:
+        try:
+            _ACTIVE_OPERATION.reset(token)
+        except (RuntimeError, ValueError):
+            pass
+
+    def add_google_request(self, duration_seconds: object) -> None:
+        pass
+
+    def add_storage_read(self, duration_seconds: object) -> None:
+        pass
+
+    def add_storage_write(self, duration_seconds: object) -> None:
+        pass
+
+    def add_coordinator_wait(self, duration_seconds: object) -> None:
+        pass
+
+    def finish(self, outcome: object) -> None:
+        pass
 
 
 def _record_active(method: str, duration_seconds: object) -> None:
