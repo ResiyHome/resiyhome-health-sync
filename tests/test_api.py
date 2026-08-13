@@ -32,6 +32,7 @@ from custom_components.resiyhome_health_sync.const import (
     SCOPES,
     TOKEN_URL,
 )
+from custom_components.resiyhome_health_sync.performance import PerformanceRecorder
 
 STEPS_URL = f"{HEALTH_API_BASE_URL}/users/me/dataTypes/steps/dataPoints"
 PAIRED_DEVICES_URL = f"{HEALTH_API_BASE_URL}/users/me/pairedDevices"
@@ -281,6 +282,102 @@ async def test_refresh_retries_request_once(client, aioclient_mock, token_update
     aioclient_mock.post(TOKEN_URL, json=VALID_REFRESH_RESPONSE)
 
     assert await client.async_list_data_points("steps", start=RAW_START, end=RAW_END) == []
+    assert [call[0].lower() for call in aioclient_mock.mock_calls] == ["get", "post", "get"]
+    token_update_callback.assert_awaited_once()
+
+
+async def test_successful_get_records_one_transport_attempt(
+    client, aioclient_mock, monkeypatch
+) -> None:
+    """A successful data GET records one request duration without changing its result."""
+    aioclient_mock.get(STEPS_URL, json={"dataPoints": []})
+    durations = iter((10.0, 10.125))
+    monkeypatch.setattr(api_module, "perf_counter", durations.__next__, raising=False)
+    recorder = PerformanceRecorder()
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=("core_activity",),
+        started_at=RAW_START,
+    )
+    token = operation.activate()
+    try:
+        assert await client._async_get_json(STEPS_URL, {}) == {"dataPoints": []}
+    finally:
+        operation.finish("success")
+        operation.deactivate(token)
+
+    record = recorder.snapshot()[0]
+    assert record.google_request_count == 1
+    assert record.google_request_duration_ms == 125
+    assert aioclient_mock.call_count == 1
+
+
+async def test_successful_post_records_one_transport_attempt(
+    client, aioclient_mock, monkeypatch
+) -> None:
+    """A successful data POST records one request duration without changing its result."""
+    body = {"range": {"start": "2042-07-12", "end": "2042-07-13"}}
+    aioclient_mock.post(DAILY_ROLLUP_TOTAL_CALORIES_URL, json={"rollupDataPoints": []})
+    durations = iter((20.0, 20.25))
+    monkeypatch.setattr(api_module, "perf_counter", durations.__next__, raising=False)
+    recorder = PerformanceRecorder()
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=("core_activity",),
+        started_at=RAW_START,
+    )
+    token = operation.activate()
+    try:
+        assert await client._async_post_json(DAILY_ROLLUP_TOTAL_CALORIES_URL, body) == {
+            "rollupDataPoints": []
+        }
+    finally:
+        operation.finish("success")
+        operation.deactivate(token)
+
+    record = recorder.snapshot()[0]
+    assert record.google_request_count == 1
+    assert record.google_request_duration_ms == 250
+    assert aioclient_mock.call_count == 1
+
+
+async def test_unauthorized_get_refresh_success_records_two_transport_attempts(
+    client, aioclient_mock, token_update_callback, monkeypatch
+) -> None:
+    """A 401 refresh retry records both data GET attempts, excluding token refresh."""
+    responses = iter(
+        (
+            AiohttpClientMockResponse("get", URL(STEPS_URL), status=401),
+            AiohttpClientMockResponse("get", URL(STEPS_URL), json={"dataPoints": []}),
+        )
+    )
+
+    async def get_response(*_args: Any) -> AiohttpClientMockResponse:
+        return next(responses)
+
+    aioclient_mock.get(STEPS_URL, side_effect=get_response)
+    aioclient_mock.post(TOKEN_URL, json=VALID_REFRESH_RESPONSE)
+    durations = iter((30.0, 30.1, 30.2, 30.35))
+    monkeypatch.setattr(api_module, "perf_counter", durations.__next__, raising=False)
+    recorder = PerformanceRecorder()
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=("core_activity",),
+        started_at=RAW_START,
+    )
+    token = operation.activate()
+    try:
+        assert await client._async_get_json(STEPS_URL, {}) == {"dataPoints": []}
+    finally:
+        operation.finish("success")
+        operation.deactivate(token)
+
+    record = recorder.snapshot()[0]
+    assert record.google_request_count == 2
+    assert record.google_request_duration_ms == 250
     assert [call[0].lower() for call in aioclient_mock.mock_calls] == ["get", "post", "get"]
     token_update_callback.assert_awaited_once()
 

@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from typing import Any, Literal
 
 from aiohttp import ClientError, ClientSession
@@ -15,6 +16,7 @@ from .capabilities import (
     validate_granted_scopes,
 )
 from .const import HEALTH_API_BASE_URL, TOKEN_URL
+from .performance import record_google_request
 
 REQUEST_TIMEOUT_SECONDS = 30
 DEFAULT_PAGE_SIZE = 10000
@@ -505,6 +507,7 @@ class GoogleHealthClient:
         """Make one GET request, refreshing credentials once after a 401."""
         for has_refreshed in (False, True):
             failure_message: str | None = None
+            request_started = perf_counter()
             try:
                 async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                     async with self._session.get(
@@ -533,6 +536,8 @@ class GoogleHealthClient:
                 failure_message = "Google Health request failed"
             except (TypeError, ValueError):
                 failure_message = "Google Health returned an invalid response"
+            finally:
+                record_google_request(perf_counter() - request_started)
 
             if failure_message is not None:
                 raise UpdateFailed(failure_message)
@@ -545,6 +550,7 @@ class GoogleHealthClient:
         """Make one POST request, refreshing credentials once after a 401."""
         for has_refreshed in (False, True):
             failure_message: str | None = None
+            request_started = perf_counter()
             try:
                 async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                     async with self._session.post(
@@ -573,6 +579,8 @@ class GoogleHealthClient:
                 failure_message = "Google Health request failed"
             except (TypeError, ValueError):
                 failure_message = "Google Health returned an invalid response"
+            finally:
+                record_google_request(perf_counter() - request_started)
 
             if failure_message is not None:
                 raise UpdateFailed(failure_message)
