@@ -5,6 +5,7 @@ from math import inf, nan
 
 import pytest
 
+from custom_components.resiyhome_health_sync import performance as performance_module
 from custom_components.resiyhome_health_sync.capabilities import CapabilityId
 from custom_components.resiyhome_health_sync.performance import (
     OPERATIONS,
@@ -92,6 +93,33 @@ def test_module_helpers_are_no_op_without_active_context() -> None:
     record_storage_write(0.020)
 
     assert PerformanceRecorder().snapshot() == ()
+
+
+@pytest.mark.parametrize(
+    ("helper", "method"),
+    [
+        (record_google_request, "add_google_request"),
+        (record_storage_read, "add_storage_read"),
+        (record_storage_write, "add_storage_write"),
+    ],
+)
+def test_module_helpers_suppress_active_recorder_cancellation(helper, method: str) -> None:
+    """Shared telemetry helpers treat recorder cancellation as observational failure."""
+
+    class CancelledOperation:
+        def __getattr__(self, name: str):
+            assert name == method
+
+            def cancelled(_duration: object) -> None:
+                raise asyncio.CancelledError("telemetry recorder cancelled")
+
+            return cancelled
+
+    token = performance_module._ACTIVE_OPERATION.set(CancelledOperation())
+    try:
+        helper(0.125)
+    finally:
+        performance_module._ACTIVE_OPERATION.reset(token)
 
 
 async def _run_isolated_operation(

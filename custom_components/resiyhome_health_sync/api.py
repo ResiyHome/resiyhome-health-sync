@@ -34,7 +34,7 @@ def _record_google_request_best_effort(started_at: float | None) -> None:
         return
     try:
         record_google_request(perf_counter() - started_at)
-    except Exception:
+    except (asyncio.CancelledError, Exception):
         pass
 
 type DataTypeOperation = Literal["list", "get", "reconcile", "rollup", "daily_rollup"]
@@ -521,7 +521,7 @@ class GoogleHealthClient:
                 async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                     try:
                         request_started = perf_counter()
-                    except Exception:
+                    except (asyncio.CancelledError, Exception):
                         request_started = None
                     try:
                         async with self._session.get(
@@ -568,7 +568,7 @@ class GoogleHealthClient:
                 async with asyncio.timeout(REQUEST_TIMEOUT_SECONDS):
                     try:
                         request_started = perf_counter()
-                    except Exception:
+                    except (asyncio.CancelledError, Exception):
                         request_started = None
                     try:
                         async with self._session.post(

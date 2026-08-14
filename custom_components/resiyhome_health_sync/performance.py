@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections import deque
 from collections.abc import Callable, Iterable
@@ -305,7 +306,7 @@ def _record_active(method: str, duration_seconds: object) -> None:
         return
     try:
         getattr(operation, method)(duration_seconds)
-    except Exception:
+    except (asyncio.CancelledError, Exception):
         pass
 
 

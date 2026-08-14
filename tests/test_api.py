@@ -1,5 +1,6 @@
 """Tests for the read-only Google Health API boundary."""
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -479,6 +480,111 @@ async def test_timing_failures_do_not_change_successful_get_attempt_behavior(
     assert clock_calls == failure_call
     assert recorder.snapshot()[0].google_request_count == 0
     assert aioclient_mock.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("method", "failure_call"),
+    [("get", 1), ("get", 2), ("post", 1), ("post", 2)],
+)
+async def test_timing_cancellation_does_not_change_successful_request_behavior(
+    client, aioclient_mock, monkeypatch, method: str, failure_call: int
+) -> None:
+    """Telemetry cancellation before or after a request leaves it unchanged."""
+    body = {"range": {"start": "2042-07-12", "end": "2042-07-13"}}
+    if method == "get":
+        aioclient_mock.get(STEPS_URL, json={"dataPoints": []})
+    else:
+        aioclient_mock.post(
+            DAILY_ROLLUP_TOTAL_CALORIES_URL, json={"rollupDataPoints": []}
+        )
+    clock_calls = 0
+
+    def cancelled_clock() -> float:
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls == failure_call:
+            raise asyncio.CancelledError("telemetry clock cancelled")
+        return 50.0 + clock_calls
+
+    monkeypatch.setattr(api_module, "perf_counter", cancelled_clock)
+    recorder = PerformanceRecorder()
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=("core_activity",),
+        started_at=RAW_START,
+    )
+    token = operation.activate()
+    try:
+        if method == "get":
+            assert await client._async_get_json(STEPS_URL, {}) == {"dataPoints": []}
+        else:
+            assert await client._async_post_json(
+                DAILY_ROLLUP_TOTAL_CALORIES_URL, body
+            ) == {"rollupDataPoints": []}
+    finally:
+        operation.finish("success")
+        operation.deactivate(token)
+
+    assert clock_calls == failure_call
+    assert recorder.snapshot()[0].google_request_count == 0
+    assert aioclient_mock.call_count == 1
+
+
+@pytest.mark.parametrize("method", ["get", "post"])
+async def test_cancelled_recorder_does_not_change_successful_request_behavior(
+    client, aioclient_mock, monkeypatch, method: str
+) -> None:
+    """Cancellation from the active request recorder is observational only."""
+    body = {"range": {"start": "2042-07-12", "end": "2042-07-13"}}
+    if method == "get":
+        aioclient_mock.get(STEPS_URL, json={"dataPoints": []})
+    else:
+        aioclient_mock.post(
+            DAILY_ROLLUP_TOTAL_CALORIES_URL, json={"rollupDataPoints": []}
+        )
+
+    def cancelled_recorder(_duration: float) -> None:
+        raise asyncio.CancelledError("telemetry recorder cancelled")
+
+    monkeypatch.setattr(api_module, "record_google_request", cancelled_recorder)
+
+    if method == "get":
+        assert await client._async_get_json(STEPS_URL, {}) == {"dataPoints": []}
+    else:
+        assert await client._async_post_json(
+            DAILY_ROLLUP_TOTAL_CALORIES_URL, body
+        ) == {"rollupDataPoints": []}
+
+    assert aioclient_mock.call_count == 1
+
+
+async def test_session_request_cancellation_propagates_unchanged(client) -> None:
+    """Cancellation raised by the actual session request remains observable."""
+    cancellation = asyncio.CancelledError("request cancelled")
+
+    class CancelledRequest:
+        async def __aenter__(self) -> None:
+            raise cancellation
+
+        async def __aexit__(self, *_args: object) -> bool:
+            return False
+
+    class CancelledSession:
+        calls = 0
+
+        def get(self, *_args: object, **_kwargs: object) -> CancelledRequest:
+            self.calls += 1
+            return CancelledRequest()
+
+    session = CancelledSession()
+    client._session = session
+
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await client._async_get_json(STEPS_URL, {})
+
+    assert raised.value is cancellation
+    assert session.calls == 1
 
 
 async def test_recorder_failure_does_not_mask_failed_get_attempt_error(
