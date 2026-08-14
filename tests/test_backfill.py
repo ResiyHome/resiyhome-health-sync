@@ -16,6 +16,7 @@ from test_coordinator import (
 from custom_components.resiyhome_health_sync.api import AuthenticationError, UpdateFailed
 from custom_components.resiyhome_health_sync.coordinator import HealthSyncCoordinator
 from custom_components.resiyhome_health_sync.models import DailySummary, ExpandedDailyMetrics
+from custom_components.resiyhome_health_sync.performance import PerformanceRecorder
 from custom_components.resiyhome_health_sync.storage import HealthHistoryStore
 
 
@@ -54,6 +55,7 @@ async def test_backfill_bounds_high_volume_core_window_to_seven_days(hass) -> No
         hass,
         _HighVolumeWindowClient(),
         store,
+        performance=PerformanceRecorder(),
         now=lambda: now,
     )
 
@@ -69,7 +71,9 @@ async def test_backfill_uses_7_day_window_and_persists_checkpoint(hass) -> None:
     client.all_sources["steps"] = [_steps(date(2042, 7, 10), 7200)]
     client.wearables["steps"] = [_steps(date(2042, 7, 10), 7000)]
     store = FakeStore()
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_backfill_step()
 
@@ -80,9 +84,7 @@ async def test_backfill_uses_7_day_window_and_persists_checkpoint(hass) -> None:
     windows = {
         (call[2], call[3])
         for call in client.calls
-        if call[:2] == ("all-sources", "steps")
-        and call[2] is not None
-        and call[3] is not None
+        if call[:2] == ("all-sources", "steps") and call[2] is not None and call[3] is not None
     }
     assert windows == {
         (
@@ -95,7 +97,9 @@ async def test_backfill_uses_7_day_window_and_persists_checkpoint(hass) -> None:
 async def test_empty_window_advances_and_does_not_complete_early(hass) -> None:
     now = datetime(2042, 7, 13, 15, 0, tzinfo=UTC)
     store = FakeStore()
-    coordinator = HealthSyncCoordinator(hass, FakeClient(), store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, FakeClient(), store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     first = await coordinator.async_backfill_step()
     second = await coordinator.async_backfill_step()
@@ -109,7 +113,9 @@ async def test_recreated_coordinator_resumes_from_durable_checkpoint(hass) -> No
     now = datetime(2042, 7, 13, 15, 0, tzinfo=UTC)
     store = FakeStore(cursor=date(2042, 6, 12))
     client = FakeClient()
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     await coordinator.async_backfill_step()
 
@@ -123,7 +129,9 @@ async def test_failed_window_does_not_advance_checkpoint(hass) -> None:
     now = datetime(2042, 7, 13, 15, 0, tzinfo=UTC)
     client = FakeClient()
     store = FakeStore(cursor=date(2042, 6, 12))
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
     for data_type in coordinator.data_types:
         client.failures[("all-sources", data_type)] = UpdateFailed("temporary")
 
@@ -143,7 +151,9 @@ async def test_raw_failure_with_successful_reconciliation_retries_same_window(ha
     client.wearables["steps"] = [_steps(returned_day, 6800)]
     client.failures[("raw", "steps")] = UpdateFailed("raw attribution unavailable")
     store = FakeStore()
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     with pytest.raises(UpdateFailed):
         await coordinator.async_backfill_step()
@@ -158,7 +168,9 @@ async def test_backfill_auth_failure_marks_authorization_unhealthy(hass) -> None
     client = FakeClient()
     client.failures[("all-sources", "steps")] = AuthenticationError("reauthorize")
     store = FakeStore()
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     with pytest.raises(AuthenticationError):
         await coordinator.async_backfill_step()
@@ -172,7 +184,9 @@ async def test_cancelled_backfill_releases_lock_without_advancing_checkpoint(has
     client = FakeClient()
     client.backfill_gate = asyncio.Event()
     store = FakeStore()
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     task = hass.async_create_task(coordinator.async_backfill_step())
     while not client.calls:
@@ -194,7 +208,9 @@ async def test_cancellation_after_row_upsert_leaves_checkpoint_for_idempotent_re
     store = FakeStore()
     store.upsert_committed = asyncio.Event()
     store.release_upsert = asyncio.Event()
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     task = hass.async_create_task(coordinator.async_backfill_step())
     await store.upsert_committed.wait()
@@ -211,9 +227,7 @@ async def test_cancellation_after_row_upsert_leaves_checkpoint_for_idempotent_re
     store.upsert_committed = None
     store.release_upsert = None
     await coordinator.async_backfill_step()
-    assert [day for day, row in store.rows.items() if row.steps is not None] == [
-        returned_day
-    ]
+    assert [day for day, row in store.rows.items() if row.steps is not None] == [returned_day]
     assert store.backfill_cursor == date(2042, 7, 6)
 
 
@@ -226,7 +240,9 @@ async def test_cancellation_during_committed_checkpoint_keeps_states_consistent(
     store = FakeStore()
     store.checkpoint_committed = asyncio.Event()
     store.release_checkpoint = asyncio.Event()
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     task = hass.async_create_task(coordinator.async_backfill_step())
     await store.checkpoint_committed.wait()
@@ -267,7 +283,9 @@ async def test_backfill_stops_at_twenty_year_provider_boundary(hass) -> None:
     now = datetime(2042, 7, 13, 15, 0, tzinfo=UTC)
     store = FakeStore(cursor=date(2022, 7, 14))
     client = FakeClient()
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_backfill_step()
     completed = await coordinator.async_backfill_step()
@@ -290,16 +308,16 @@ async def test_backfill_late_correction_replaces_existing_day(hass) -> None:
     store = FakeStore()
     client = FakeClient()
     client.all_sources["steps"] = [_steps(corrected_day, 7000)]
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
     await coordinator.async_backfill_step()
 
     client.all_sources["steps"] = [_steps(corrected_day, 7100)]
     store.backfill_cursor = date(2042, 7, 13)
     await coordinator.async_backfill_step()
 
-    assert [day for day, row in store.rows.items() if row.steps is not None] == [
-        corrected_day
-    ]
+    assert [day for day, row in store.rows.items() if row.steps is not None] == [corrected_day]
     assert store.rows[corrected_day].steps == 7100
 
 
@@ -317,7 +335,9 @@ async def test_core_backfill_preserves_existing_expanded_metrics(hass) -> None:
     )
     client = FakeClient()
     client.all_sources["steps"] = [_steps(returned_day, 7000)]
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     await coordinator.async_backfill_step()
 
@@ -345,6 +365,7 @@ async def test_expanded_backfill_is_bounded_checkpointed_and_core_cursor_indepen
         hass,
         client,
         store,
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=True,
     )
@@ -390,9 +411,13 @@ async def test_recreated_coordinator_resumes_expanded_backfill_checkpoint(hass) 
     )
     client = FakeClient()
 
-    first = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    first = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
     snapshot = await first.async_backfill_step()
-    recreated = HealthSyncCoordinator(hass, FakeClient(), store, now=lambda: now)
+    recreated = HealthSyncCoordinator(
+        hass, FakeClient(), store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     assert snapshot.expanded_backfill_cursor == date(2042, 6, 9)
     assert recreated.data.expanded_backfill_cursor == date(2042, 6, 9)
@@ -411,6 +436,7 @@ async def test_weight_backfill_stores_only_measurement_day_and_updates_latest_sn
         hass,
         client,
         store,
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=True,
     )
@@ -444,7 +470,9 @@ async def test_multi_day_expanded_backfill_persists_each_direct_and_rollup_day(
         _daily_rollup(second_day, "floors", countSum="7"),
     ]
     store = FakeStore(cursor=date(2006, 7, 21))
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_backfill_step()
 
@@ -472,6 +500,7 @@ async def test_enabling_body_measurements_restarts_completed_expanded_backfill(
         hass,
         client,
         store,
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=True,
     )
@@ -500,6 +529,7 @@ async def test_enabled_body_backfill_resumes_without_reset_after_restart(hass) -
         hass,
         FakeClient(),
         store,
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=True,
     )
@@ -509,6 +539,7 @@ async def test_enabled_body_backfill_resumes_without_reset_after_restart(hass) -
         hass,
         restarted_client,
         store,
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=True,
     )
@@ -542,6 +573,7 @@ async def test_disabling_body_measurements_scrubs_current_and_latest_weight(
         hass,
         FakeClient(),
         store,
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=False,
     )

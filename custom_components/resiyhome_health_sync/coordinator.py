@@ -233,7 +233,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         client: GoogleHealthClient,
         history: HealthHistoryStore,
         *,
-        performance: PerformanceRecorder | None = None,
+        performance: PerformanceRecorder,
         now: _NowProvider = dt_util.now,
         include_body_measurements: bool = False,
     ) -> None:
@@ -245,7 +245,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         )
         self.client = client
         self.history = history
-        self.performance = performance or PerformanceRecorder()
+        self.performance = performance
         self.data = CoordinatorSnapshot(
             backfill_cursor=history.backfill_cursor,
             expanded_backfill_cursor=history.expanded_backfill_cursor,
@@ -287,13 +287,13 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
                 enabled_capabilities=capabilities,
                 started_at=self._now(),
             )
-        except Exception:
+        except (asyncio.CancelledError, Exception):
             return None, None
         if measurement is None:
             return None, None
         try:
             return measurement, measurement.activate()
-        except Exception:
+        except (asyncio.CancelledError, Exception):
             return measurement, None
 
     @staticmethod
@@ -304,7 +304,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
             return
         try:
             measurement.finish(outcome)
-        except Exception:
+        except (asyncio.CancelledError, Exception):
             pass
 
     @staticmethod
@@ -315,7 +315,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
             return
         try:
             measurement.deactivate(token)
-        except Exception:
+        except (asyncio.CancelledError, Exception):
             pass
 
     async def _async_update_data(self) -> CoordinatorSnapshot:
@@ -525,7 +525,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
     async def _async_acquire_backfill_lock(
         self, measurement: PerformanceOperation | None = None
     ) -> None:
-        wait_started = _performance_monotonic()
+        wait_started = _telemetry_monotonic()
         while self._lock.locked() or self._current_waiters:
             await asyncio.sleep(0)
         try:
@@ -645,8 +645,9 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         self, measurement: PerformanceOperation | None = None
     ) -> None:
         self._current_waiters += 1
-        wait_started = _performance_monotonic()
+        wait_started: float | None = None
         try:
+            wait_started = _telemetry_monotonic()
             await self._lock.acquire()
         finally:
             self._current_waiters -= 1
@@ -1589,7 +1590,15 @@ def _performance_monotonic() -> float | None:
     """Read the instrumentation clock without affecting coordinator behavior."""
     try:
         return time_module.monotonic()
-    except Exception:
+    except (asyncio.CancelledError, Exception):
+        return None
+
+
+def _telemetry_monotonic() -> float | None:
+    """Call an instrumentation clock without allowing it to cancel health work."""
+    try:
+        return _performance_monotonic()
+    except (asyncio.CancelledError, Exception):
         return None
 
 
@@ -1600,8 +1609,8 @@ def _record_lock_wait(
     if measurement is None or started is None:
         return
     try:
-        finished = _performance_monotonic()
+        finished = _telemetry_monotonic()
         if finished is not None:
             measurement.add_coordinator_wait(finished - started)
-    except Exception:
+    except (asyncio.CancelledError, Exception):
         pass

@@ -32,7 +32,12 @@ from custom_components.resiyhome_health_sync.models import (
     ExpandedDailyMetrics,
     SourceKind,
 )
-from custom_components.resiyhome_health_sync.performance import PerformanceRecorder
+from custom_components.resiyhome_health_sync.performance import (
+    PerformanceRecorder,
+    record_google_request,
+    record_storage_read,
+    record_storage_write,
+)
 from custom_components.resiyhome_health_sync.storage import HistoryStoreError
 
 
@@ -132,8 +137,7 @@ def _nutrition(day: date, kcal: object, *, hour: int = 8) -> dict:
     end = start + timedelta(minutes=30)
     return {
         "dataPointName": (
-            "users/private/dataTypes/nutrition-log/dataPoints/"
-            f"reconciled-nutrition-{hour}"
+            f"users/private/dataTypes/nutrition-log/dataPoints/reconciled-nutrition-{hour}"
         ),
         "nutritionLog": {
             "interval": {
@@ -160,8 +164,7 @@ def _hydration(day: date, milliliters: object, *, hour: int = 8) -> dict:
     end = start + timedelta(minutes=30)
     return {
         "dataPointName": (
-            "users/private/dataTypes/hydration-log/dataPoints/"
-            f"reconciled-hydration-{hour}"
+            f"users/private/dataTypes/hydration-log/dataPoints/reconciled-hydration-{hour}"
         ),
         "hydrationLog": {
             "interval": {
@@ -188,9 +191,7 @@ def _adversarial_raw_nutrition(point: dict) -> dict:
     point["name"] = "users/private/dataTypes/nutrition-log/dataPoints/private-record"
     point["dataSource"] = {"name": "users/private/dataSources/private-source"}
     point["nutritionLog"]["foodDisplayName"] = "Private meal"
-    point["nutritionLog"]["nutrients"] = [
-        {"nutrient": "PROTEIN", "quantity": {"grams": 20.0}}
-    ]
+    point["nutritionLog"]["nutrients"] = [{"nutrient": "PROTEIN", "quantity": {"grams": 20.0}}]
     return point
 
 
@@ -401,6 +402,8 @@ class FakeStore:
         self.release_upsert: asyncio.Event | None = None
         self.checkpoint_committed: asyncio.Event | None = None
         self.release_checkpoint: asyncio.Event | None = None
+        self.expanded_checkpoint_committed: asyncio.Event | None = None
+        self.release_expanded_checkpoint: asyncio.Event | None = None
 
     async def async_load(self) -> list[DailySummary]:
         return [self.rows[day] for day in sorted(self.rows)]
@@ -429,6 +432,10 @@ class FakeStore:
         self.rows[summary.date] = summary
         self.expanded_backfill_cursor = next_cursor
         self.expanded_checkpoints.append(next_cursor)
+        if self.expanded_checkpoint_committed is not None:
+            self.expanded_checkpoint_committed.set()
+            assert self.release_expanded_checkpoint is not None
+            await self.release_expanded_checkpoint.wait()
 
     async def async_apply_body_measurement_option(
         self, enabled: bool, today: date
@@ -485,11 +492,105 @@ def store() -> FakeStore:
 
 @pytest.fixture
 def coordinator(hass, client: FakeClient, store: FakeStore, now: datetime):
-    return HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    return HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
 
 def test_coordinator_uses_fifteen_minute_polling(coordinator) -> None:
     assert coordinator.update_interval == SCAN_INTERVAL
+
+
+class _CancelledTelemetryOperation:
+    """Telemetry double that cancels at one synchronous recorder boundary."""
+
+    def __init__(self, boundary: str) -> None:
+        self.boundary = boundary
+
+    def activate(self) -> object:
+        if self.boundary == "activate":
+            raise asyncio.CancelledError
+        return object()
+
+    def finish(self, _outcome: str) -> None:
+        if self.boundary == "finish":
+            raise asyncio.CancelledError
+
+    def deactivate(self, _token: object) -> None:
+        if self.boundary == "deactivate":
+            raise asyncio.CancelledError
+
+    def add_coordinator_wait(self, _duration: object) -> None:
+        if self.boundary == "add_wait":
+            raise asyncio.CancelledError
+
+
+class _CancelledTelemetryRecorder:
+    """Recorder double that cancels only at the requested synchronous boundary."""
+
+    def __init__(self, boundary: str) -> None:
+        self.boundary = boundary
+
+    def begin(self, *_args, **_kwargs) -> _CancelledTelemetryOperation:
+        if self.boundary == "begin":
+            raise asyncio.CancelledError
+        return _CancelledTelemetryOperation(self.boundary)
+
+
+@pytest.mark.parametrize("boundary", ("begin", "activate", "finish", "deactivate", "add_wait"))
+async def test_current_refresh_suppresses_telemetry_cancellation_without_stranding_lock(
+    hass, client: FakeClient, store: FakeStore, now: datetime, boundary: str
+) -> None:
+    """A telemetry cancellation must not replace a successful refresh or retain a lock waiter."""
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        store,
+        performance=_CancelledTelemetryRecorder(boundary),
+        now=lambda: now,
+    )
+
+    snapshot = await coordinator.async_refresh_current()
+
+    assert snapshot.last_success == now
+    assert coordinator._current_waiters == 0
+    assert coordinator._lock.locked() is False
+    await coordinator.async_refresh_current()
+
+
+async def test_current_refresh_suppresses_telemetry_clock_cancellation_before_acquiring_lock(
+    hass, client: FakeClient, store: FakeStore, now: datetime, monkeypatch
+) -> None:
+    """A timing clock cancellation before lock acquisition must not retain a current waiter."""
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        store,
+        performance=PerformanceRecorder(),
+        now=lambda: now,
+    )
+
+    def cancel_clock() -> float:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(
+        "custom_components.resiyhome_health_sync.coordinator._performance_monotonic",
+        cancel_clock,
+    )
+
+    snapshot = await coordinator.async_refresh_current()
+
+    assert snapshot.last_success == now
+    assert coordinator._current_waiters == 0
+    assert coordinator._lock.locked() is False
+
+
+def test_coordinator_requires_explicit_performance_recorder(
+    hass, client: FakeClient, store: FakeStore
+) -> None:
+    """Omitting the recorder must fail instead of creating an unowned fallback recorder."""
+    with pytest.raises(TypeError):
+        HealthSyncCoordinator(hass, client, store)
 
 
 async def test_current_refresh_performance_records_each_public_refresh_path_once(
@@ -587,6 +688,7 @@ async def test_current_refresh_performance_records_propagated_failure_outcomes(
         now=lambda: now,
     )
     if isinstance(failure, HistoryStoreError):
+
         async def raise_storage_error(_summary) -> None:
             raise failure
 
@@ -626,11 +728,169 @@ async def test_current_refresh_performance_records_cancelled_without_swallowing_
     assert recorder.snapshot()[0].outcome == "cancelled"
 
 
+@pytest.mark.parametrize(
+    ("failure", "outcome"),
+    [
+        (AuthenticationError("authorization failed"), "authorization_error"),
+        (UpdateFailed("temporary failure"), "temporary_error"),
+        (HistoryStoreError("storage failure"), "storage_error"),
+    ],
+)
+async def test_backfill_performance_records_propagated_failure_outcomes(
+    hass,
+    client: FakeClient,
+    store: FakeStore,
+    now: datetime,
+    failure: Exception,
+    outcome: str,
+) -> None:
+    """A backfill failure must retain its type while recording the approved outcome."""
+    recorder = PerformanceRecorder()
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        store,
+        performance=recorder,
+        now=lambda: now,
+    )
+    if isinstance(failure, HistoryStoreError):
+
+        async def raise_storage_error(_cursor: date | None) -> None:
+            raise failure
+
+        store.async_set_backfill_checkpoint = raise_storage_error
+    else:
+        client.failures[("all-sources", "steps")] = failure
+
+    with pytest.raises(type(failure)):
+        await coordinator.async_backfill_step()
+
+    assert recorder.snapshot()[0].operation == "backfill_step"
+    assert recorder.snapshot()[0].outcome == outcome
+
+
+async def test_backfill_performance_records_cancelled_core_checkpoint(
+    hass, client: FakeClient, store: FakeStore, now: datetime
+) -> None:
+    """Cancellation during a shielded core checkpoint must finish the record and propagate."""
+    recorder = PerformanceRecorder()
+    store.checkpoint_committed = asyncio.Event()
+    store.release_checkpoint = asyncio.Event()
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        store,
+        performance=recorder,
+        now=lambda: now,
+    )
+
+    backfill = hass.async_create_task(coordinator.async_backfill_step())
+    await store.checkpoint_committed.wait()
+    backfill.cancel()
+    store.release_checkpoint.set()
+    with pytest.raises(asyncio.CancelledError):
+        await backfill
+
+    assert recorder.snapshot()[0].outcome == "cancelled"
+    assert coordinator.data.backfill_cursor == store.backfill_cursor
+    assert coordinator._lock.locked() is False
+
+
+async def test_backfill_performance_records_cancelled_expanded_checkpoint(
+    hass, client: FakeClient, now: datetime
+) -> None:
+    """Cancellation during a shielded expanded checkpoint must finish the record and propagate."""
+    recorder = PerformanceRecorder()
+    boundary = now.date().replace(year=now.year - 20)
+    store = FakeStore(cursor=boundary)
+    store.expanded_checkpoint_committed = asyncio.Event()
+    store.release_expanded_checkpoint = asyncio.Event()
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        store,
+        performance=recorder,
+        now=lambda: now,
+    )
+
+    backfill = hass.async_create_task(coordinator.async_backfill_step())
+    await store.expanded_checkpoint_committed.wait()
+    backfill.cancel()
+    store.release_expanded_checkpoint.set()
+    with pytest.raises(asyncio.CancelledError):
+        await backfill
+
+    assert recorder.snapshot()[0].outcome == "cancelled"
+    assert coordinator.data.expanded_backfill_cursor == store.expanded_backfill_cursor
+    assert coordinator._lock.locked() is False
+
+
+async def test_concurrent_current_and_backfill_performance_attribution_is_context_local(
+    hass, client: FakeClient, store: FakeStore, now: datetime
+) -> None:
+    """Concurrent public operations must retain their own request and storage measurements."""
+    recorder = PerformanceRecorder()
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        store,
+        performance=recorder,
+        now=lambda: now,
+    )
+    core_started = asyncio.Event()
+    release_core = asyncio.Event()
+
+    async def current_locked(_now: datetime):
+        record_google_request(0.100)
+        record_storage_read(0.100)
+        record_storage_write(0.100)
+        return coordinator.data
+
+    async def core_locked() -> None:
+        record_google_request(0.200)
+        record_storage_write(0.300)
+        core_started.set()
+        await release_core.wait()
+
+    async def expanded_locked() -> None:
+        record_google_request(0.400)
+        record_storage_read(0.500)
+
+    coordinator._async_refresh_current_locked = current_locked
+    coordinator._async_backfill_core_step_locked = core_locked
+    coordinator._async_backfill_expanded_step_locked = expanded_locked
+
+    backfill = hass.async_create_task(coordinator.async_backfill_step())
+    await core_started.wait()
+    current = hass.async_create_task(coordinator.async_refresh_current())
+    while coordinator._current_waiters == 0:
+        await asyncio.sleep(0)
+    release_core.set()
+    await current
+    await backfill
+
+    records = {record.operation: record for record in recorder.snapshot()}
+    assert records["current_refresh"].google_request_count == 1
+    assert records["current_refresh"].google_request_duration_ms == 100
+    assert records["current_refresh"].storage_read_count == 1
+    assert records["current_refresh"].storage_read_duration_ms == 100
+    assert records["current_refresh"].storage_write_count == 1
+    assert records["current_refresh"].storage_write_duration_ms == 100
+    assert records["backfill_step"].google_request_count == 2
+    assert records["backfill_step"].google_request_duration_ms == 600
+    assert records["backfill_step"].storage_read_count == 1
+    assert records["backfill_step"].storage_read_duration_ms == 500
+    assert records["backfill_step"].storage_write_count == 1
+    assert records["backfill_step"].storage_write_duration_ms == 300
+
+
 async def test_manual_refresh_has_five_minute_cooldown(
     hass, client: FakeClient, store: FakeStore, now: datetime
 ) -> None:
     clock = [now]
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: clock[0])
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: clock[0]
+    )
 
     await coordinator.async_manual_refresh()
     await coordinator.async_manual_refresh()
@@ -645,7 +905,9 @@ async def test_failed_manual_refresh_throttles_until_five_minutes_have_elapsed(
     hass, client: FakeClient, store: FakeStore, now: datetime
 ) -> None:
     clock = [now]
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: clock[0])
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: clock[0]
+    )
     for data_type in coordinator.data_types:
         client.failures[("all-sources", data_type)] = UpdateFailed("temporary")
 
@@ -672,7 +934,9 @@ async def test_manual_cooldown_starts_when_api_attempt_begins(
     store = FakeStore()
     store.upsert_committed = asyncio.Event()
     store.release_upsert = asyncio.Event()
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: clock[0])
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: clock[0]
+    )
 
     refresh = hass.async_create_task(coordinator.async_manual_refresh())
     await store.upsert_committed.wait()
@@ -704,9 +968,7 @@ async def test_total_calories_and_sleep_period_current_refresh_use_existing_slee
     hass, client: FakeClient, store: FakeStore, now: datetime
 ) -> None:
     """Current refresh merges total calories and detailed timing without another sleep call."""
-    client.rollups["total-calories"] = [
-        _daily_rollup(now.date(), "totalCalories", kcalSum=0.0)
-    ]
+    client.rollups["total-calories"] = [_daily_rollup(now.date(), "totalCalories", kcalSum=0.0)]
     sleep = _sleep(
         start=now.replace(hour=4),
         start_offset_seconds=0,
@@ -722,7 +984,9 @@ async def test_total_calories_and_sleep_period_current_refresh_use_existing_slee
         }
     )
     client.all_sources["sleep"] = [sleep]
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -757,7 +1021,9 @@ async def test_nutrition_refresh_uses_only_the_current_local_civil_day(
         _hydration(now.date(), 1200.0, hour=13),
     ]
     store = FakeStore()
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -813,7 +1079,9 @@ async def test_nutrition_refresh_requires_enabled_option_and_granted_scope(
 ) -> None:
     """Option and permission gates are independent and schedule no partial request."""
     client.scope_grant = validate_granted_scopes(scopes, options)
-    coordinator = HealthSyncCoordinator(hass, client, FakeStore(), now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, FakeStore(), performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -840,7 +1108,9 @@ async def test_nutrition_capability_never_runs_during_historical_backfill(
         {"include_nutrition": True},
     )
     store = FakeStore(cursor=now.date(), expanded_cursor=now.date())
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     await coordinator.async_backfill_step()
 
@@ -891,7 +1161,9 @@ async def test_nutrition_request_failure_preserves_values_and_baseline_health(
     client.all_sources["nutrition-log"] = [_nutrition(now.date(), 1820.0)]
     client.all_sources["hydration-log"] = [_hydration(now.date(), 2100.0)]
     client.failures[("all-sources", failed_type)] = UpdateFailed(message)
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -926,7 +1198,9 @@ async def test_paired_device_refresh_normalizes_current_metadata_without_history
         cursor=now.date() - timedelta(days=21),
         expanded_cursor=now.date() - timedelta(days=14),
     )
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -979,7 +1253,9 @@ async def test_paired_device_refresh_requires_option_and_settings_scope(
     """Partial consent never schedules a settings request or harms baseline health."""
     client.scope_grant = validate_granted_scopes(scopes, options)
     client.paired_devices = [_paired_device()]
-    coordinator = HealthSyncCoordinator(hass, client, FakeStore(), now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, FakeStore(), performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -1022,6 +1298,7 @@ async def test_paired_device_failure_preserves_tuple_and_only_marks_its_capabili
         hass,
         client,
         FakeStore(cursor=core_cursor, expanded_cursor=expanded_cursor),
+        performance=PerformanceRecorder(),
         now=lambda: clock[0],
     )
     first = await coordinator.async_refresh_current()
@@ -1072,7 +1349,9 @@ async def test_disabling_paired_devices_clears_ephemeral_metadata(
         {"include_paired_devices": True},
     )
     client.paired_devices = [_paired_device()]
-    coordinator = HealthSyncCoordinator(hass, client, FakeStore(), now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, FakeStore(), performance=PerformanceRecorder(), now=lambda: now
+    )
     await coordinator.async_refresh_current()
 
     client.scope_grant = validate_granted_scopes(BASE_SCOPES, {})
@@ -1097,7 +1376,9 @@ async def test_paired_devices_are_never_requested_during_backfill(
     )
     client.paired_devices = [_paired_device()]
     store = FakeStore(cursor=now.date(), expanded_cursor=now.date())
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     await coordinator.async_backfill_step()
 
@@ -1134,7 +1415,9 @@ async def test_total_calories_and_sleep_period_are_normalized_during_backfill(
     )
     client.all_sources["sleep"] = [sleep]
     store = FakeStore(cursor=now.date())
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     await coordinator.async_backfill_step()
 
@@ -1161,7 +1444,9 @@ async def test_total_calories_date_only_rollups_are_partitioned_during_backfill(
         rollup["civilEndTime"].pop("time")
     client.rollups["total-calories"] = rollups
     store = FakeStore(cursor=now.date())
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     await coordinator.async_backfill_step()
 
@@ -1181,7 +1466,9 @@ async def test_undated_total_calories_do_not_repeat_across_backfill_days(
     ]
     client.rollups["total-calories"] = [{"totalCalories": {"kcalSum": 2300.0}}]
     store = FakeStore(cursor=now.date())
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     await coordinator.async_backfill_step()
 
@@ -1208,7 +1495,9 @@ async def test_total_calories_failure_preserves_prior_activity_values(
         "total calories unavailable"
     )
     store = FakeStore([previous])
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -1290,7 +1579,9 @@ async def test_partial_metric_failure_preserves_only_failed_group(
     )
     store = FakeStore([previous])
     client.failures[("all-sources", "distance")] = UpdateFailed("distance unavailable")
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -1399,7 +1690,9 @@ async def test_failed_expanded_type_preserves_only_its_prior_group(
         )
     ]
     client.rollups["floors"] = [_daily_rollup(now.date(), "floors", countSum="7")]
-    coordinator = HealthSyncCoordinator(hass, client, FakeStore([previous]), now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, FakeStore([previous]), performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -1414,7 +1707,9 @@ async def test_failed_expanded_type_preserves_only_its_prior_group(
 async def test_failed_expanded_type_does_not_inherit_from_a_different_current_day(
     hass, client: FakeClient, now: datetime
 ) -> None:
-    coordinator = HealthSyncCoordinator(hass, client, FakeStore(), now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, FakeStore(), performance=PerformanceRecorder(), now=lambda: now
+    )
     coordinator.data.current_day = DailySummary(
         date=now.date() - timedelta(days=1),
         expanded=ExpandedDailyMetrics(vo2_max=44.0),
@@ -1437,6 +1732,7 @@ async def test_body_measurements_are_not_requested_without_opt_in(
         hass,
         client,
         store,
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=False,
     )
@@ -1444,8 +1740,7 @@ async def test_body_measurements_are_not_requested_without_opt_in(
     snapshot = await coordinator.async_manual_refresh()
 
     assert not any(
-        data_type in {"weight", "body-fat", "height"}
-        for _, data_type, _, _ in client.calls
+        data_type in {"weight", "body-fat", "height"} for _, data_type, _, _ in client.calls
     )
     assert snapshot.current_day.expanded.weight_kg is None
     assert snapshot.current_day.expanded.body_fat_percentage is None
@@ -1468,6 +1763,7 @@ async def test_disabling_body_measurements_scrubs_and_prevents_resurrection(
         hass,
         client,
         store,
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=True,
     )
@@ -1487,6 +1783,7 @@ async def test_disabling_body_measurements_scrubs_and_prevents_resurrection(
         hass,
         client,
         store,
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=False,
     )
@@ -1494,8 +1791,7 @@ async def test_disabling_body_measurements_scrubs_and_prevents_resurrection(
     after_disable = await disabled.async_manual_refresh()
 
     assert not any(
-        data_type in {"weight", "body-fat", "height"}
-        for _, data_type, _, _ in client.calls
+        data_type in {"weight", "body-fat", "height"} for _, data_type, _, _ in client.calls
     )
     assert after_disable.current_day.expanded.weight_kg is None
     assert after_disable.current_day.expanded.body_fat_percentage is None
@@ -1542,17 +1838,14 @@ async def test_body_measurements_are_requested_and_surfaced_together(
         hass,
         client,
         FakeStore(body_measurements_enabled=True),
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=True,
     )
 
     snapshot = await coordinator.async_manual_refresh()
 
-    requested = {
-        data_type
-        for family, data_type, _, _ in client.calls
-        if family == "all-sources"
-    }
+    requested = {data_type for family, data_type, _, _ in client.calls if family == "all-sources"}
     assert {"weight", "body-fat", "height"} <= requested
     assert snapshot.current_day.expanded.weight_kg == 80.5
     assert snapshot.current_day.expanded.body_fat_percentage == 21.4
@@ -1576,6 +1869,7 @@ async def test_old_height_sample_is_imported_without_widening_daily_backfill(
         hass,
         client,
         store,
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=True,
     )
@@ -1600,6 +1894,7 @@ async def test_body_measurements_backfill_requests_stay_within_ninety_days(
         hass,
         client,
         FakeStore(cursor=date.min),
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=True,
     )
@@ -1610,8 +1905,7 @@ async def test_body_measurements_backfill_requests_stay_within_ninety_days(
     body_calls = [
         (data_type, start, end)
         for family, data_type, start, end in client.calls
-        if family == "all-sources"
-        and data_type in {"weight", "body-fat", "height"}
+        if family == "all-sources" and data_type in {"weight", "body-fat", "height"}
     ]
     assert {data_type for data_type, _, _ in body_calls} == {
         "weight",
@@ -1619,9 +1913,7 @@ async def test_body_measurements_backfill_requests_stay_within_ninety_days(
         "height",
     }
     assert all(
-        start.date() >= boundary
-        and end.date() <= now.date()
-        and end - start <= timedelta(days=14)
+        start.date() >= boundary and end.date() <= now.date() and end - start <= timedelta(days=14)
         for _, start, end in body_calls
     )
     assert coordinator.data.expanded_backfill_cursor == boundary
@@ -1653,6 +1945,7 @@ async def test_latest_body_measurements_are_selected_independently_from_history(
         hass,
         client,
         FakeStore(rows, body_measurements_enabled=True),
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=True,
     )
@@ -1716,6 +2009,7 @@ async def test_body_measurements_preserve_only_the_failed_previous_latest_value(
         hass,
         client,
         FakeStore([previous], body_measurements_enabled=True),
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=True,
     )
@@ -1723,9 +2017,7 @@ async def test_body_measurements_preserve_only_the_failed_previous_latest_value(
     snapshot = await coordinator.async_manual_refresh()
 
     assert getattr(snapshot.current_day.expanded, failed_value_field) is None
-    assert getattr(snapshot, failed_latest_field) == getattr(
-        previous.expanded, failed_value_field
-    )
+    assert getattr(snapshot, failed_latest_field) == getattr(previous.expanded, failed_value_field)
     assert getattr(snapshot, failed_date_field) == previous_day
     for successful_type, value_field, latest_field in (
         ("weight", "weight_kg", "latest_weight_kg"),
@@ -1771,6 +2063,7 @@ async def test_empty_current_weight_recomputes_latest_stored_measurement(
         hass,
         client,
         FakeStore(rows),
+        performance=PerformanceRecorder(),
         now=lambda: now,
         include_body_measurements=True,
     )
@@ -1799,7 +2092,9 @@ async def test_current_partial_steps_preserve_previous_source(
     )
     store = FakeStore([previous])
     client.failures[(failed_stream, "steps")] = UpdateFailed("steps input unavailable")
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -1810,7 +2105,9 @@ async def test_first_refresh_raw_failure_marks_source_unavailable(
     hass, client: FakeClient, now: datetime
 ) -> None:
     client.failures[("raw", "steps")] = UpdateFailed("raw attribution unavailable")
-    coordinator = HealthSyncCoordinator(hass, client, FakeStore(), now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, FakeStore(), performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -1824,7 +2121,9 @@ async def test_first_refresh_all_source_steps_failure_marks_source_unavailable(
     hass, client: FakeClient, now: datetime
 ) -> None:
     client.failures[("all-sources", "steps")] = UpdateFailed("steps unavailable")
-    coordinator = HealthSyncCoordinator(hass, client, FakeStore(), now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, FakeStore(), performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -1838,7 +2137,9 @@ async def test_first_refresh_wearable_steps_failure_marks_source_unavailable(
     hass, client: FakeClient, now: datetime
 ) -> None:
     client.failures[("google-wearables", "steps")] = UpdateFailed("wearable unavailable")
-    coordinator = HealthSyncCoordinator(hass, client, FakeStore(), now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, FakeStore(), performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -1882,7 +2183,9 @@ async def test_detroit_dst_windows_and_offsets_partition_into_the_local_day(
     client.wearables["steps"] = points
     client.raw["steps"] = [point | {"dataSource": {"platform": "FITBIT"}} for point in points]
     store = FakeStore()
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -1905,6 +2208,7 @@ async def test_detroit_dst_exercise_uses_civil_start_day(hass) -> None:
         hass,
         client,
         FakeStore(),
+        performance=PerformanceRecorder(),
         now=lambda: datetime(2026, 3, 8, 12, tzinfo=ZoneInfo("America/Detroit")),
     )
 
@@ -1961,6 +2265,7 @@ async def test_malformed_nested_civil_date_time_uses_physical_fallback(
         hass,
         client,
         FakeStore(),
+        performance=PerformanceRecorder(),
         now=lambda: datetime(2026, 3, 9, 12, tzinfo=ZoneInfo("America/Detroit")),
     )
 
@@ -1985,6 +2290,7 @@ async def test_detroit_dst_sleep_uses_local_end_day(
         hass,
         client,
         FakeStore(),
+        performance=PerformanceRecorder(),
         now=lambda: datetime(2026, 11, 1, 12, tzinfo=detroit),
     )
 
@@ -1997,7 +2303,9 @@ async def test_missing_current_sleep_logs_redacted_diagnostics(
     hass, caplog, client: FakeClient, store: FakeStore, now: datetime
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="custom_components.resiyhome_health_sync.coordinator")
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -2009,11 +2317,14 @@ async def test_missing_current_sleep_logs_redacted_diagnostics(
     assert "access_token" not in caplog.text
     assert "refresh_token" not in caplog.text
     assert "data_points" not in caplog.text
-    assert next(
-        record
-        for record in caplog.records
-        if "Sleep diagnostics for current refresh" in record.getMessage()
-    ).levelno == logging.DEBUG
+    assert (
+        next(
+            record
+            for record in caplog.records
+            if "Sleep diagnostics for current refresh" in record.getMessage()
+        ).levelno
+        == logging.DEBUG
+    )
 
 
 async def test_missing_current_source_records_log_redacted_fetch_diagnostics(
@@ -2033,7 +2344,9 @@ async def test_missing_current_source_records_log_redacted_fetch_diagnostics(
             )
         ]
     }
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -2050,11 +2363,14 @@ async def test_missing_current_source_records_log_redacted_fetch_diagnostics(
     assert "1700" not in caplog.text
     assert "access_token" not in caplog.text
     assert "refresh_token" not in caplog.text
-    assert next(
-        record
-        for record in caplog.records
-        if "Fetch diagnostics for current refresh" in record.getMessage()
-    ).levelno == logging.DEBUG
+    assert (
+        next(
+            record
+            for record in caplog.records
+            if "Fetch diagnostics for current refresh" in record.getMessage()
+        ).levelno
+        == logging.DEBUG
+    )
 
 
 async def test_missing_expanded_rollups_log_only_redacted_shape_diagnostics(
@@ -2076,7 +2392,9 @@ async def test_missing_expanded_rollups_log_only_redacted_shape_diagnostics(
             }
         }
     ]
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     await coordinator.async_manual_refresh()
 
@@ -2084,11 +2402,14 @@ async def test_missing_expanded_rollups_log_only_redacted_shape_diagnostics(
     assert "direct_counts=(active-zone-minutes=1" in caplog.text
     assert "rollup_counts=(active-zone-minutes=0" in caplog.text
     assert "private_health_value" not in caplog.text
-    assert next(
-        record
-        for record in caplog.records
-        if "Expanded diagnostics for current refresh" in record.getMessage()
-    ).levelno == logging.DEBUG
+    assert (
+        next(
+            record
+            for record in caplog.records
+            if "Expanded diagnostics for current refresh" in record.getMessage()
+        ).levelno
+        == logging.DEBUG
+    )
 
 
 async def test_optional_probe_logs_only_counts_and_source_labels(
@@ -2108,7 +2429,9 @@ async def test_optional_probe_logs_only_counts_and_source_labels(
     client.wearables = {
         "active-zone-minutes": [{"activeZoneMinutes": {"activeZoneMinutes": "23"}}],
     }
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     result = await coordinator.async_probe_optional_data_types(days=7)
 
@@ -2128,11 +2451,14 @@ async def test_optional_probe_logs_only_counts_and_source_labels(
     assert "secret" not in message_text
     assert "23" not in message_text
     assert "42" not in message_text
-    assert next(
-        record
-        for record in caplog.records
-        if "Optional data type availability probe" in record.getMessage()
-    ).levelno == logging.INFO
+    assert (
+        next(
+            record
+            for record in caplog.records
+            if "Optional data type availability probe" in record.getMessage()
+        ).levelno
+        == logging.INFO
+    )
     assert (
         "all-sources",
         "active-zone-minutes",
@@ -2150,7 +2476,9 @@ async def test_optional_probe_continues_after_one_data_type_fails(
     client = FakeClient()
     client.failures[("all-sources", first)] = UpdateFailed("temporary")
     client.all_sources = {second: [{}]}
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     result = await coordinator.async_probe_optional_data_types(data_types=(first, second), days=3)
 
@@ -2165,7 +2493,9 @@ async def test_optional_probe_respects_operation_capabilities(
     """Reconcile-only and rollup-only types never call unsupported endpoints."""
     client = FakeClient()
     client.all_sources = {"floors": [{"floors": {"count": "4"}}]}
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     result = await coordinator.async_probe_optional_data_types(
         data_types=("floors", "calories-in-heart-rate-zone"), days=14
@@ -2188,7 +2518,9 @@ async def test_optional_probe_rejects_unsafe_ranges(
     hass, store: FakeStore, now: datetime, days: object
 ) -> None:
     """The probe stays inside Google's shortest documented query limit."""
-    coordinator = HealthSyncCoordinator(hass, FakeClient(), store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, FakeClient(), store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     with pytest.raises(ValueError, match="between 1 and 14"):
         await coordinator.async_probe_optional_data_types(days=days)  # type: ignore[arg-type]
@@ -2206,7 +2538,9 @@ async def test_invalid_current_sleep_logs_only_counts_and_availability(
     )
     del point["sleep"]["summary"]
     client.all_sources["sleep"] = [point]
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -2232,7 +2566,9 @@ async def test_missing_sleep_stages_logs_counts_without_stage_shapes(
     point["sleep"]["summary"]["minutesAwake"] = "12"
     point["sleep"]["summary"]["stagesSummary"] = [{"unknownStageKeys": "present"}]
     client.all_sources["sleep"] = [point]
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     snapshot = await coordinator.async_manual_refresh()
 
@@ -2266,7 +2602,9 @@ async def test_missing_sleep_stages_never_logs_stage_types_or_values(
         {"type": "LIGHT", "minutes": "500", "count": "12"},
     ]
     client.all_sources["sleep"] = [point]
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     await coordinator.async_manual_refresh()
 
@@ -2300,7 +2638,9 @@ async def test_staleness_starts_after_forty_five_minutes(
     hass, client: FakeClient, store: FakeStore, now: datetime
 ) -> None:
     clock = [now]
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: clock[0])
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: clock[0]
+    )
     await coordinator.async_manual_refresh()
 
     clock[0] += timedelta(minutes=45)
@@ -2312,7 +2652,9 @@ async def test_staleness_starts_after_forty_five_minutes(
 async def test_current_refresh_runs_before_waiting_backfill(
     hass, client: FakeClient, store: FakeStore, now: datetime
 ) -> None:
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
     await coordinator._lock.acquire()
     backfill = hass.async_create_task(coordinator.async_backfill_step())
     await asyncio.sleep(0)
@@ -2333,7 +2675,9 @@ async def test_current_refresh_runs_between_core_and_expanded_backfill_windows(
     store = FakeStore()
     store.checkpoint_committed = asyncio.Event()
     store.release_checkpoint = asyncio.Event()
-    coordinator = HealthSyncCoordinator(hass, client, store, now=lambda: now)
+    coordinator = HealthSyncCoordinator(
+        hass, client, store, performance=PerformanceRecorder(), now=lambda: now
+    )
 
     backfill = hass.async_create_task(coordinator.async_backfill_step())
     await store.checkpoint_committed.wait()
