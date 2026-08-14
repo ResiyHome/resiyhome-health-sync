@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import re
+import time as time_module
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from datetime import UTC, date, datetime, time, timedelta
@@ -42,7 +43,8 @@ from .models import (
 )
 from .normalize import DataPoint, DataPointStreams, normalize_day
 from .paired_devices import normalize_paired_devices
-from .storage import HealthHistoryStore
+from .performance import PerformanceOperation, PerformanceRecorder
+from .storage import HealthHistoryStore, HistoryStoreError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -231,6 +233,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         client: GoogleHealthClient,
         history: HealthHistoryStore,
         *,
+        performance: PerformanceRecorder,
         now: _NowProvider = dt_util.now,
         include_body_measurements: bool = False,
     ) -> None:
@@ -242,6 +245,7 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         )
         self.client = client
         self.history = history
+        self.performance = performance
         self.data = CoordinatorSnapshot(
             backfill_cursor=history.backfill_cursor,
             expanded_backfill_cursor=history.expanded_backfill_cursor,
@@ -268,6 +272,52 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         last_success = self.data.last_success
         return last_success is None or self._now() - last_success > _STALE_AFTER
 
+    def _activate_performance_operation(
+        self, operation: str
+    ) -> tuple[PerformanceOperation | None, object | None]:
+        """Begin best-effort telemetry without changing refresh behavior on failures."""
+        try:
+            capabilities = self.client.scope_grant.enabled_capabilities
+            measurement = self.performance.begin(
+                operation,
+                backfill_active=(
+                    not self.data.backfill_complete
+                    or not self.data.expanded_backfill_complete
+                ),
+                enabled_capabilities=capabilities,
+                started_at=self._now(),
+            )
+        except (asyncio.CancelledError, Exception):
+            return None, None
+        if measurement is None:
+            return None, None
+        try:
+            return measurement, measurement.activate()
+        except (asyncio.CancelledError, Exception):
+            return measurement, None
+
+    @staticmethod
+    def _finish_performance_operation(
+        measurement: PerformanceOperation | None, outcome: str
+    ) -> None:
+        if measurement is None:
+            return
+        try:
+            measurement.finish(outcome)
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    @staticmethod
+    def _deactivate_performance_operation(
+        measurement: PerformanceOperation | None, token: object | None
+    ) -> None:
+        if measurement is None or token is None:
+            return
+        try:
+            measurement.deactivate(token)
+        except (asyncio.CancelledError, Exception):
+            pass
+
     async def _async_update_data(self) -> CoordinatorSnapshot:
         """Run the scheduled current-day refresh."""
         try:
@@ -281,28 +331,74 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
 
     async def async_manual_refresh(self) -> CoordinatorSnapshot:
         """Refresh current data unless the dashboard cooldown is still active."""
-        await self._async_acquire_current_lock()
+        measurement, token = self._activate_performance_operation("current_refresh")
+        lock_acquired = False
         try:
+            await self._async_acquire_current_lock(measurement)
+            lock_acquired = True
             now = self._now()
             if (
                 self._last_manual_refresh is not None
                 and now - self._last_manual_refresh < MANUAL_REFRESH_COOLDOWN
             ):
-                return self.data
-            self._last_manual_refresh = now
-            snapshot = await self._async_refresh_current_locked(now)
-            self.async_set_updated_data(snapshot)
+                snapshot = self.data
+            else:
+                self._last_manual_refresh = now
+                snapshot = await self._async_refresh_current_locked(now)
+                self.async_set_updated_data(snapshot)
+        except asyncio.CancelledError:
+            self._finish_performance_operation(measurement, "cancelled")
+            raise
+        except AuthenticationError:
+            self._finish_performance_operation(measurement, "authorization_error")
+            raise
+        except HistoryStoreError:
+            self._finish_performance_operation(measurement, "storage_error")
+            raise
+        except UpdateFailed:
+            self._finish_performance_operation(measurement, "temporary_error")
+            raise
+        except Exception:
+            self._finish_performance_operation(measurement, "temporary_error")
+            raise
+        else:
+            self._finish_performance_operation(measurement, "success")
             return snapshot
         finally:
-            self._lock.release()
+            if lock_acquired:
+                self._lock.release()
+            self._deactivate_performance_operation(measurement, token)
 
     async def async_refresh_current(self) -> CoordinatorSnapshot:
         """Refresh current data without applying the dashboard cooldown."""
-        await self._async_acquire_current_lock()
+        measurement, token = self._activate_performance_operation("current_refresh")
+        lock_acquired = False
         try:
-            return await self._async_refresh_current_locked(self._now())
+            await self._async_acquire_current_lock(measurement)
+            lock_acquired = True
+            snapshot = await self._async_refresh_current_locked(self._now())
+        except asyncio.CancelledError:
+            self._finish_performance_operation(measurement, "cancelled")
+            raise
+        except AuthenticationError:
+            self._finish_performance_operation(measurement, "authorization_error")
+            raise
+        except HistoryStoreError:
+            self._finish_performance_operation(measurement, "storage_error")
+            raise
+        except UpdateFailed:
+            self._finish_performance_operation(measurement, "temporary_error")
+            raise
+        except Exception:
+            self._finish_performance_operation(measurement, "temporary_error")
+            raise
+        else:
+            self._finish_performance_operation(measurement, "success")
+            return snapshot
         finally:
-            self._lock.release()
+            if lock_acquired:
+                self._lock.release()
+            self._deactivate_performance_operation(measurement, token)
 
     async def async_probe_optional_data_types(
         self,
@@ -386,25 +482,56 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
 
     async def async_backfill_step(self) -> CoordinatorSnapshot:
         """Import one core and one expanded window with current refresh priority."""
-        await asyncio.sleep(0)
-        await self._async_acquire_backfill_lock()
+        measurement, token = self._activate_performance_operation("backfill_step")
+        lock_acquired = False
         try:
-            await self._async_backfill_core_step_locked()
-        finally:
-            self._lock.release()
-
-        await asyncio.sleep(0)
-        await self._async_acquire_backfill_lock()
-        try:
-            await self._async_backfill_expanded_step_locked()
-            return self.data
-        finally:
-            self._lock.release()
-
-    async def _async_acquire_backfill_lock(self) -> None:
-        while self._lock.locked() or self._current_waiters:
             await asyncio.sleep(0)
-        await self._lock.acquire()
+            await self._async_acquire_backfill_lock(measurement)
+            lock_acquired = True
+            try:
+                await self._async_backfill_core_step_locked()
+            finally:
+                self._lock.release()
+                lock_acquired = False
+
+            await asyncio.sleep(0)
+            await self._async_acquire_backfill_lock(measurement)
+            lock_acquired = True
+            await self._async_backfill_expanded_step_locked()
+            snapshot = self.data
+        except asyncio.CancelledError:
+            self._finish_performance_operation(measurement, "cancelled")
+            raise
+        except AuthenticationError:
+            self._finish_performance_operation(measurement, "authorization_error")
+            raise
+        except HistoryStoreError:
+            self._finish_performance_operation(measurement, "storage_error")
+            raise
+        except UpdateFailed:
+            self._finish_performance_operation(measurement, "temporary_error")
+            raise
+        except Exception:
+            self._finish_performance_operation(measurement, "temporary_error")
+            raise
+        else:
+            self._finish_performance_operation(measurement, "success")
+            return snapshot
+        finally:
+            if lock_acquired:
+                self._lock.release()
+            self._deactivate_performance_operation(measurement, token)
+
+    async def _async_acquire_backfill_lock(
+        self, measurement: PerformanceOperation | None = None
+    ) -> None:
+        wait_started = _telemetry_monotonic()
+        try:
+            while self._lock.locked() or self._current_waiters:
+                await asyncio.sleep(0)
+            await self._lock.acquire()
+        finally:
+            _record_lock_wait(measurement, wait_started)
 
     async def _async_backfill_core_step_locked(self) -> None:
         await self._async_ensure_history_loaded()
@@ -514,12 +641,17 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
             )
         return (*_EXPANDED_DIRECT_TYPES, *_EXPANDED_ROLLUP_TYPES)
 
-    async def _async_acquire_current_lock(self) -> None:
+    async def _async_acquire_current_lock(
+        self, measurement: PerformanceOperation | None = None
+    ) -> None:
         self._current_waiters += 1
+        wait_started: float | None = None
         try:
+            wait_started = _telemetry_monotonic()
             await self._lock.acquire()
         finally:
             self._current_waiters -= 1
+            _record_lock_wait(measurement, wait_started)
 
     async def _async_commit_backfill_checkpoint(self, cursor: date, boundary: date) -> None:
         """Keep durable and in-memory cursor state atomic across cancellation."""
@@ -1452,3 +1584,33 @@ def _years_before(day: date, years: int) -> date:
         return day.replace(year=day.year - years)
     except ValueError:
         return day.replace(year=day.year - years, day=28)
+
+
+def _performance_monotonic() -> float | None:
+    """Read the instrumentation clock without affecting coordinator behavior."""
+    try:
+        return time_module.monotonic()
+    except (asyncio.CancelledError, Exception):
+        return None
+
+
+def _telemetry_monotonic() -> float | None:
+    """Call an instrumentation clock without allowing it to cancel health work."""
+    try:
+        return _performance_monotonic()
+    except (asyncio.CancelledError, Exception):
+        return None
+
+
+def _record_lock_wait(
+    measurement: PerformanceOperation | None, started: float | None
+) -> None:
+    """Add one lock acquisition duration to the active operation when available."""
+    if measurement is None or started is None:
+        return
+    try:
+        finished = _telemetry_monotonic()
+        if finished is not None:
+            measurement.add_coordinator_wait(finished - started)
+    except (asyncio.CancelledError, Exception):
+        pass

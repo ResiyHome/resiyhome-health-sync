@@ -63,6 +63,7 @@ from custom_components.resiyhome_health_sync.models import (
     SourceKind,
     WorkoutSummary,
 )
+from custom_components.resiyhome_health_sync.performance import PerformanceRecorder
 from custom_components.resiyhome_health_sync.sensor import SENSOR_DESCRIPTIONS
 
 NOW = datetime(2042, 7, 13, 12, 0, tzinfo=UTC)
@@ -301,6 +302,7 @@ async def _setup_person(
         hass,
         MagicMock(),
         history,
+        performance=PerformanceRecorder(),
         now=lambda: clock[0],
     )
     snapshot = snapshot or CoordinatorSnapshot(
@@ -440,9 +442,13 @@ def test_exactly_eight_additive_person_sensor_descriptions() -> None:
             True,
         ),
     }
-    for key, (unit, device_class, state_class, capability, enabled_default) in (
-        expected_contracts.items()
-    ):
+    for key, (
+        unit,
+        device_class,
+        state_class,
+        capability,
+        enabled_default,
+    ) in expected_contracts.items():
         description = descriptions[key]
         assert description.native_unit_of_measurement == unit
         assert description.device_class == device_class
@@ -483,12 +489,8 @@ def test_additive_person_sensor_values_and_measurement_dates_are_exact() -> None
     assert {
         key: descriptions[key].value_fn(snapshot) for key in PARITY_PERSON_SENSOR_KEYS
     } == expected_values
-    assert descriptions["body_fat"].attributes_fn(snapshot) == {
-        "measurement_date": "2042-07-11"
-    }
-    assert descriptions["height"].attributes_fn(snapshot) == {
-        "measurement_date": "2042-07-10"
-    }
+    assert descriptions["body_fat"].attributes_fn(snapshot) == {"measurement_date": "2042-07-11"}
+    assert descriptions["height"].attributes_fn(snapshot) == {"measurement_date": "2042-07-10"}
 
 
 @pytest.mark.parametrize(
@@ -583,10 +585,7 @@ async def test_nutrition_registry_lifecycle_requires_capability_before_first_add
         return {
             unique_id: registry.entities[entity_id]
             for unique_id in nutrition_unique_ids
-            if (
-                entity_id := registry.async_get_entity_id("sensor", DOMAIN, unique_id)
-            )
-            is not None
+            if (entity_id := registry.async_get_entity_id("sensor", DOMAIN, unique_id)) is not None
         }
 
     assert nutrition_entries() == {}
@@ -692,9 +691,7 @@ def test_new_sensor_translations_match_strings() -> None:
         "battery_level": {"name": "Battery level"},
         "last_device_sync": {"name": "Last device sync"},
     }
-    strings = json.loads(
-        Path("custom_components/resiyhome_health_sync/strings.json").read_text()
-    )
+    strings = json.loads(Path("custom_components/resiyhome_health_sync/strings.json").read_text())
     translations = json.loads(
         Path("custom_components/resiyhome_health_sync/translations/en.json").read_text()
     )
@@ -1272,16 +1269,19 @@ async def test_paired_device_reorder_disappearance_and_return_preserve_registry_
     await hass.async_block_till_done()
     assert paired_entities() == initial
     assert all(_state(hass, entity_id).state == STATE_UNAVAILABLE for entity_id in initial.values())
-    assert len(
-        [
-            device
-            for device in dr.async_get(hass).devices.values()
-            if any(
-                domain == DOMAIN and "_paired_" in identifier
-                for domain, identifier in device.identifiers
-            )
-        ]
-    ) == 2
+    assert (
+        len(
+            [
+                device
+                for device in dr.async_get(hass).devices.values()
+                if any(
+                    domain == DOMAIN and "_paired_" in identifier
+                    for domain, identifier in device.identifiers
+                )
+            ]
+        )
+        == 2
+    )
 
     changed_first = _paired_device(
         product_name="Charge 6 Updated",
@@ -1329,9 +1329,7 @@ async def test_paired_device_manager_registers_one_unload_managed_listener(hass)
     coordinator.async_add_listener.assert_called_once()
     entry.async_on_unload.assert_called_once_with(remove_listener)
     assert len(added) == len(SENSOR_DESCRIPTIONS)
-    assert sum(
-        isinstance(entity, sensor.HealthSyncPairedDeviceSensor) for entity in added
-    ) == 2
+    assert sum(isinstance(entity, sensor.HealthSyncPairedDeviceSensor) for entity in added) == 2
     assert not any(
         isinstance(entity, sensor.HealthSyncSensor)
         and entity.entity_description.required_capability is CapabilityId.NUTRITION

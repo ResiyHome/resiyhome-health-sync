@@ -310,6 +310,57 @@ def test_troubleshooting_unconditionally_prohibits_direct_storage_edits() -> Non
     assert "Do not edit Home Assistant storage while Home Assistant is running." not in guide
 
 
+def test_cpu_spike_support_checklist_is_complete_and_privacy_safe() -> None:
+    """Affected users get one bounded, reviewable performance-support workflow."""
+    guide = _read("docs/troubleshooting.md")
+
+    for checklist_item in (
+        "Health Sync version and Home Assistant Core version",
+        "Home Assistant installation type and hardware model/specifications",
+        "Number of Health Sync people configured",
+        "Enabled optional capabilities for each person",
+        "Whether core and expanded backfill are complete",
+        "Approximate normal CPU use and spike level",
+        "A CPU-history screenshot covering at least one hour",
+        "Downloaded Health Sync diagnostics for every configured person",
+        "Whether the pattern continues after backfill completes",
+        "Whether temporarily disabling all Health Sync config entries removes the pattern",
+    ):
+        assert checklist_item in guide
+    for statement in (
+        "Performance records are memory-only and limited to the latest 12 operations.",
+        "Review diagnostics before posting them publicly.",
+        "Temporarily disabling Health Sync is an isolation test, not a required fix.",
+        "correlation clue, not proof",
+        "at least four cycles (one hour)",
+        "health values",
+        "logs with credentials",
+        "raw Google payloads",
+        "unreviewed diagnostics",
+        "re-enable them after the observation",
+        "Settings > Devices & services > Integrations",
+        "Download diagnostics",
+    ):
+        assert statement in guide
+
+
+def test_readme_explains_cpu_diagnostics_beta_workflow() -> None:
+    """The README gives affected users a short, evidence-led beta workflow."""
+    readme = " ".join(_read("README.md").split())
+
+    for statement in (
+        "## Reporting 15-minute CPU spikes",
+        "This diagnostics beta is not a claimed CPU fix.",
+        "Complete the one post-download restart in the installation sequence.",
+        "Allow at least four normal polling cycles (one hour)",
+        "Do not repeatedly run the manual refresh action during the observation.",
+        "Download diagnostics for every configured person",
+        "CPU-history screenshot covering the same hour",
+        "Review every diagnostics file before sharing it.",
+    ):
+        assert statement in readme
+
+
 def test_multi_user_distinguishes_entity_identity_from_storage_isolation() -> None:
     guide = " ".join(_read("docs/multi-user.md").split())
 
