@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, cast
 
 from homeassistant.components.diagnostics import REDACTED
@@ -172,14 +172,48 @@ _SAFE_PERFORMANCE_INTEGER_KEY_TOKENS = frozenset(
         ("maximum", "coordinator", "wait", "duration", "ms"),
     }
 )
+_SAFE_PERFORMANCE_CAPABILITIES = frozenset(
+    capability.value for capability in CapabilityId
+)
 _SAFE_PERFORMANCE_STRING_VALUES = {
     ("operation",): OPERATIONS,
     ("outcome",): OUTCOMES,
     ("slowest", "phase"): PHASES,
     ("most", "frequent", "slowest", "phase"): PHASES,
-    ("enabled", "capabilities"): frozenset(
-        capability.value for capability in CapabilityId
-    ),
+    ("enabled", "capabilities"): _SAFE_PERFORMANCE_CAPABILITIES,
+}
+_PERFORMANCE_RECORD_FIELDS = (
+    "operation",
+    "started_at",
+    "duration_ms",
+    "google_request_count",
+    "google_request_duration_ms",
+    "storage_read_count",
+    "storage_read_duration_ms",
+    "storage_write_count",
+    "storage_write_duration_ms",
+    "queued_wait_duration_ms",
+    "backfill_active",
+    "enabled_capabilities",
+    "outcome",
+    "slowest_phase",
+)
+_PERFORMANCE_RECORD_INTEGER_FIELDS = frozenset(
+    {
+        "duration_ms",
+        "google_request_count",
+        "google_request_duration_ms",
+        "storage_read_count",
+        "storage_read_duration_ms",
+        "storage_write_count",
+        "storage_write_duration_ms",
+        "queued_wait_duration_ms",
+    }
+)
+_PERFORMANCE_RECORD_ENUM_FIELDS = {
+    "operation": OPERATIONS,
+    "outcome": OUTCOMES,
+    "slowest_phase": PHASES,
 }
 _CORE_DAILY_METRICS = (
     "steps",
@@ -316,16 +350,20 @@ def _summarize_performance(
     records: tuple[PerformanceRecord, ...], snapshot: CoordinatorSnapshot
 ) -> dict[str, object]:
     """Return a bounded, value-free performance summary from recorder snapshots."""
-    ordered_records = tuple(sorted(records, key=lambda record: record.started_at))
+    valid_records = tuple(
+        serialized
+        for record in records
+        if (serialized := _performance_diagnostics_record(record)) is not None
+    )
+    ordered_records = tuple(
+        sorted(valid_records, key=lambda record: record["started_at"])
+    )
     count = len(ordered_records)
     successful_operation_count = sum(
-        getattr(record, "outcome", None) == "success" for record in ordered_records
+        record["outcome"] == "success" for record in ordered_records
     )
     phase_counts = {
-        phase: sum(
-            getattr(record, "slowest_phase", None) == phase
-            for record in ordered_records
-        )
+        phase: sum(record["slowest_phase"] == phase for record in ordered_records)
         for phase in PHASE_ORDER
     }
     values = {
@@ -402,13 +440,13 @@ def _summarize_performance(
         "record_count": count,
         "summary": summary,
         "recent_operations": [
-            _performance_diagnostics_record(record) for record in ordered_records
+            dict(record) for record in ordered_records
         ],
     }
 
 
-def _performance_int(record: PerformanceRecord, field: str) -> int:
-    value = getattr(record, field, 0)
+def _performance_int(record: Mapping[str, object], field: str) -> int:
+    value = record.get(field, 0)
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
@@ -420,13 +458,55 @@ def _performance_maximum(values: list[int]) -> int | None:
     return max(values) if values else None
 
 
-def _performance_diagnostics_record(record: PerformanceRecord) -> dict[str, object]:
+def _performance_diagnostics_record(
+    record: PerformanceRecord,
+) -> dict[str, object] | None:
     """Serialize a recorder item without letting a malformed snapshot escape diagnostics."""
     try:
         value = record.to_diagnostics()
-    except (AttributeError, TypeError, ValueError):
-        return {}
-    return value if isinstance(value, dict) else {}
+    except Exception:
+        return None
+    if not isinstance(value, dict):
+        return None
+
+    result: dict[str, object] = {}
+    for field in _PERFORMANCE_RECORD_FIELDS:
+        if field not in value or not _valid_performance_record_field(field, value[field]):
+            return None
+        item = value[field]
+        result[field] = list(item) if field == "enabled_capabilities" else item
+    return result
+
+
+def _valid_performance_record_field(field: str, value: object) -> bool:
+    if field in _PERFORMANCE_RECORD_INTEGER_FIELDS:
+        return type(value) is int and value >= 0
+    if field == "backfill_active":
+        return type(value) is bool
+    if field == "enabled_capabilities":
+        return (
+            type(value) is list
+            and all(
+                type(capability) is str
+                and capability in _SAFE_PERFORMANCE_CAPABILITIES
+                for capability in value
+            )
+            and value == sorted(set(value))
+        )
+    if field == "started_at":
+        return _is_utc_iso_datetime(value)
+    allowed = _PERFORMANCE_RECORD_ENUM_FIELDS.get(field)
+    return type(value) is str and allowed is not None and value in allowed
+
+
+def _is_utc_iso_datetime(value: object) -> bool:
+    if type(value) is not str:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.utcoffset() == timedelta(0) and parsed.isoformat() == value
 
 
 def _summarize_day(

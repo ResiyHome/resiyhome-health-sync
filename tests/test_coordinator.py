@@ -662,6 +662,52 @@ async def test_backfill_performance_records_one_combined_step_and_all_lock_wait(
     assert records[0].queued_wait_duration_ms == 36
 
 
+async def test_backfill_cancellation_in_fairness_loop_records_wait_without_releasing_lock(
+    hass, client: FakeClient, store: FakeStore, now: datetime, monkeypatch
+) -> None:
+    """Cancellation in the fairness loop records wait without claiming lock ownership."""
+    fairness_loop_entered = asyncio.Event()
+
+    class SignalingLock(asyncio.Lock):
+        def locked(self) -> bool:
+            locked = super().locked()
+            if locked:
+                fairness_loop_entered.set()
+            return locked
+
+    recorder = PerformanceRecorder()
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        store,
+        performance=recorder,
+        now=lambda: now,
+    )
+    lock = SignalingLock()
+    await lock.acquire()
+    coordinator._lock = lock
+    ticks = iter((10.0, 10.025))
+    monkeypatch.setattr(
+        "custom_components.resiyhome_health_sync.coordinator._performance_monotonic",
+        lambda: next(ticks),
+    )
+
+    backfill = hass.async_create_task(coordinator.async_backfill_step())
+    try:
+        await fairness_loop_entered.wait()
+        backfill.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await backfill
+
+        record = recorder.snapshot()[0]
+        assert record.outcome == "cancelled"
+        assert record.queued_wait_duration_ms == 25
+        assert lock.locked() is True
+    finally:
+        if lock.locked():
+            lock.release()
+
+
 @pytest.mark.parametrize(
     ("failure", "outcome"),
     [

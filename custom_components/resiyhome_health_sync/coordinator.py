@@ -526,9 +526,9 @@ class HealthSyncCoordinator(DataUpdateCoordinator[CoordinatorSnapshot]):
         self, measurement: PerformanceOperation | None = None
     ) -> None:
         wait_started = _telemetry_monotonic()
-        while self._lock.locked() or self._current_waiters:
-            await asyncio.sleep(0)
         try:
+            while self._lock.locked() or self._current_waiters:
+                await asyncio.sleep(0)
             await self._lock.acquire()
         finally:
             _record_lock_wait(measurement, wait_started)

@@ -16,6 +16,7 @@ from custom_components.resiyhome_health_sync.const import (
     SETTINGS_SCOPE,
 )
 from custom_components.resiyhome_health_sync.diagnostics import (
+    _performance_diagnostics_record,
     _redact_recursive,
     _summarize_capabilities,
     _summarize_day,
@@ -294,11 +295,68 @@ async def test_diagnostics_performance_recursively_redacts_injected_snapshot_dat
     exposed = repr(performance)
     for forbidden in FORBIDDEN:
         assert forbidden not in exposed
-    assert performance["recent_operations"][1] == {
-        "operation": REDACTED,
-        "duration_ms": REDACTED,
-        "nested": {},
-    }
+    assert performance["recent_operations"] == [record.to_diagnostics()]
+
+
+async def test_diagnostics_performance_filters_safe_shaped_additional_fields(hass) -> None:
+    """Safe-looking unknown fields cannot expand the approved operation schema."""
+    record = _performance_record()
+    injected = MagicMock(
+        started_at=record.started_at,
+        duration_ms=record.duration_ms,
+        google_request_count=record.google_request_count,
+        google_request_duration_ms=record.google_request_duration_ms,
+        storage_read_duration_ms=record.storage_read_duration_ms,
+        storage_write_duration_ms=record.storage_write_duration_ms,
+        queued_wait_duration_ms=record.queued_wait_duration_ms,
+        outcome=record.outcome,
+        slowest_phase=record.slowest_phase,
+        to_diagnostics=MagicMock(
+            return_value={
+                **record.to_diagnostics(),
+                "health_flag": True,
+                "metric_count": 12345,
+                "alternate_timestamp": NOW.isoformat(),
+                "other_duration_ms": 54321,
+            }
+        ),
+    )
+    entry = _performance_entry((injected,))
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert result["performance"]["recent_operations"] == [record.to_diagnostics()]
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("operation", "private_operation"),
+        ("started_at", "2042-07-13T13:00:00+01:00"),
+        ("duration_ms", True),
+        ("google_request_count", -1),
+        ("google_request_duration_ms", 1.5),
+        ("storage_read_count", "1"),
+        ("storage_read_duration_ms", None),
+        ("storage_write_count", False),
+        ("storage_write_duration_ms", -1),
+        ("queued_wait_duration_ms", "1"),
+        ("backfill_active", 1),
+        ("enabled_capabilities", ["sleep", "core_activity"]),
+        ("enabled_capabilities", ["core_activity", "private_metric"]),
+        ("outcome", "private_outcome"),
+        ("slowest_phase", "private_phase"),
+    ],
+)
+def test_performance_record_schema_rejects_invalid_approved_fields(
+    field: str, invalid_value: object
+) -> None:
+    """A malformed approved field invalidates the complete operation record."""
+    payload = _performance_record().to_diagnostics()
+    payload[field] = invalid_value
+    injected = MagicMock(to_diagnostics=MagicMock(return_value=payload))
+
+    assert _performance_diagnostics_record(injected) is None
 
 
 async def test_diagnostics_exposes_health_and_redacts_recursive_secrets(hass) -> None:
