@@ -373,6 +373,28 @@ def test_changelog_documents_stable_official_integration_parity_release() -> Non
         assert phrase in release
 
 
+def test_changelog_documents_performance_diagnostics_beta() -> None:
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+    assert changelog.index("## 1.1.1-beta.1") < changelog.index("## 1.1.0 -")
+    release = " ".join(
+        changelog.split("## 1.1.1-beta.1", maxsplit=1)[1]
+        .split("## 1.1.0 -", maxsplit=1)[0]
+        .split()
+    )
+    for phrase in (
+        "latest 12 operations",
+        "downloadable diagnostics",
+        "not a claimed CPU fix",
+        "four normal 15-minute polling cycles",
+        "diagnostics for every configured person",
+        "No OAuth reauthorization is required",
+        "No new sensors",
+        "existing entity IDs",
+    ):
+        assert phrase in release
+
+
 def test_fixture_provenance_is_documented() -> None:
     provenance = (ROOT / "tests" / "fixtures" / "README.md").read_text(encoding="utf-8")
     normalized = " ".join(provenance.split())
@@ -469,14 +491,14 @@ def test_readme_documents_exactly_one_post_download_restart() -> None:
     )
 
 
-def test_manifest_versions_official_integration_parity_release() -> None:
+def test_manifest_versions_performance_diagnostics_beta() -> None:
     manifest = json.loads(
         (ROOT / "custom_components" / "resiyhome_health_sync" / "manifest.json").read_text(
             encoding="utf-8"
         )
     )
 
-    assert manifest["version"] == "1.1.0"
+    assert manifest["version"] == "1.1.1-beta.1"
 
 
 def test_gitignore_blocks_credential_artifacts() -> None:
