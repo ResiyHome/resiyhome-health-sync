@@ -2,6 +2,46 @@
 
 All notable public changes to Health Sync by ResiyHome are recorded here.
 
+## 1.1.1-beta.1 - 2026-08-14
+
+### Added
+
+- Added bounded, memory-only performance measurements for current refresh and
+  backfill work. Each person retains only the latest 12 operations.
+- Added an allowlisted performance summary to downloadable diagnostics with
+  operation duration, Google request count and elapsed time, history read and
+  write timing, coordinator lock wait, outcome, backfill state, and enabled
+  capability names.
+- Added README and troubleshooting instructions for collecting one hour of CPU
+  history and diagnostics for every configured person.
+
+### Safety And Compatibility
+
+- This beta is diagnostic instrumentation, not a claimed CPU fix. It is
+  intended to identify which Health Sync phase, if any, aligns with reported
+  15-minute CPU spikes.
+- No new sensors, polling intervals, Google requests, background tasks,
+  Recorder rows, or persistent performance records were added.
+- Performance diagnostics contain no health values, OAuth material, Google
+  identifiers, request parameters, raw payloads, or exception messages.
+- Existing config entries, existing entity IDs, normalized history, and Home
+  Assistant Recorder history are preserved.
+- No OAuth reauthorization is required for this beta.
+
+### Affected-User Test Procedure
+
+1. Install the beta completely through HACS and complete the existing single
+   post-download restart sequence.
+2. Confirm every Health Sync person is loaded, then allow four normal
+   15-minute polling cycles without repeatedly running manual refresh.
+3. Capture Home Assistant CPU history covering the same hour.
+4. Download and review diagnostics for every configured person.
+5. Include the Health Sync and Home Assistant versions, installation type,
+   hardware, configured-person count, enabled options, backfill status, normal
+   CPU use, and spike level in the support report.
+6. Remove health values, credentials, account addresses, raw Google payloads,
+   unredacted storage, and personal health screenshots before sharing.
+
 ## 1.1.0 - 2026-08-06
 
 ### Added

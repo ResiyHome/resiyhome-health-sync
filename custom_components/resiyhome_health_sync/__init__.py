@@ -27,6 +27,7 @@ from .const import (
     SETTINGS_SCOPE,
 )
 from .coordinator import HealthSyncCoordinator
+from .performance import PerformanceRecorder
 from .storage import HealthHistoryStore, HistoryStoreError
 from .websocket import async_register_websocket, async_unregister_websocket
 
@@ -47,6 +48,7 @@ class HealthSyncRuntimeData:
     history: HealthHistoryStore
     coordinator: HealthSyncCoordinator
     scope_grant: ScopeGrant
+    performance: PerformanceRecorder
     backfill_task: asyncio.Task[None] | None = None
 
 
@@ -88,6 +90,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HealthSyncConfigEntry) -
         token_update_callback=async_update_token_state,
     )
     history = HealthHistoryStore(hass, entry.entry_id)
+    performance = PerformanceRecorder()
     backfill_coro = None
     setup_complete = False
     try:
@@ -95,11 +98,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: HealthSyncConfigEntry) -
             hass,
             client,
             history,
+            performance=performance,
             include_body_measurements=bool(
                 entry.options.get("include_body_measurements", False)
             ),
         )
-        runtime = HealthSyncRuntimeData(client, history, coordinator, scope_grant)
+        runtime = HealthSyncRuntimeData(
+            client,
+            history,
+            coordinator,
+            scope_grant,
+            performance,
+        )
 
         try:
             await history.async_load()

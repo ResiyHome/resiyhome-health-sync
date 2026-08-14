@@ -176,6 +176,36 @@ unavailable under the partial-update rules. The exact data contract is documente
 
 Energy dashboard remains outside this integration.
 
+## Reporting 15-minute CPU spikes
+
+This diagnostics beta is not a claimed CPU fix. It adds bounded, memory-only timing
+records so an observed CPU spike can be compared with Health Sync's current refresh and
+backfill work. It does not add polling, Google requests, sensors, recorder data, or
+persistent performance storage.
+
+Affected users helping with the investigation should:
+
+1. In HACS, enable beta versions for Health Sync and install the diagnostics beta named
+   in the issue or release announcement. Wait until HACS finishes the download.
+2. Complete the one post-download restart in the installation sequence.
+3. Confirm every Health Sync person is loaded, then use Home Assistant normally. Allow at
+   least four normal polling cycles (one hour) before collecting evidence. Do not
+   repeatedly run the manual refresh action during the observation.
+4. Save a CPU-history screenshot covering the same hour. Include the approximate normal
+   CPU level, spike level, Home Assistant installation type, hardware specifications,
+   Health Sync version, Home Assistant Core version, and whether backfill is complete.
+5. Download diagnostics for every configured person from **Settings > Devices & services
+   > Integrations** by opening each Health Sync entry's three-dot menu and selecting
+   **Download diagnostics**.
+6. Review every diagnostics file before sharing it. Do not post health values, account
+   addresses, credentials, raw Google payloads, unredacted storage, or screenshots that
+   expose personal health information.
+
+Temporarily disabling every Health Sync config entry can be used as an optional isolation
+test. Observe the same period, record whether the pattern stops, and then re-enable the
+entries. See [CPU spikes every 15 minutes](docs/troubleshooting.md#cpu-spikes-every-15-minutes)
+for the complete support checklist.
+
 ## Documentation
 
 - [Installation](docs/installation.md)

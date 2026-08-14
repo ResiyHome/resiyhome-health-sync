@@ -167,6 +167,33 @@ pending-restart state. For a completed installation, perform the one post-downlo
 described in [Installation](installation.md). Repeated restarts do not repair an incomplete
 download.
 
+## CPU spikes every 15 minutes
+
+A spike that repeats near the 15-minute polling cadence is a correlation clue, not proof
+that Health Sync is the cause. Observe at least four cycles (one hour) before drawing a
+conclusion. Performance records are memory-only and limited to the latest 12 operations.
+
+To download diagnostics, open **Settings > Devices & services > Integrations**. For every
+Health Sync config entry, open its three-dot menu, select **Download diagnostics**, and
+review the downloaded file locally before sharing it. Include the following in a support
+report:
+
+1. Health Sync version and Home Assistant Core version.
+2. Home Assistant installation type and hardware model/specifications.
+3. Number of Health Sync people configured.
+4. Enabled optional capabilities for each person.
+5. Whether core and expanded backfill are complete.
+6. Approximate normal CPU use and spike level.
+7. A CPU-history screenshot covering at least one hour.
+8. Downloaded Health Sync diagnostics for every configured person.
+9. Whether the pattern continues after backfill completes.
+10. Whether temporarily disabling all Health Sync config entries removes the pattern.
+
+Do not include health values, logs with credentials, raw Google payloads, or unreviewed diagnostics.
+Review diagnostics before posting them publicly.
+Temporarily disabling Health Sync is an isolation test, not a required fix. It is optional;
+re-enable them after the observation so normal syncing resumes.
+
 ## Requesting support safely
 
 Use the repository's [bug report form](https://github.com/ResiyHome/resiyhome-health-sync/issues/new/choose).
