@@ -111,6 +111,8 @@ def _storage_timer_start() -> float | None:
     """Start optional storage timing without affecting the storage operation."""
     try:
         return perf_counter()
+    except asyncio.CancelledError:
+        return None
     except Exception:
         return None
 

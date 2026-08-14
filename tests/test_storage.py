@@ -114,10 +114,10 @@ def _persisted_keys(value: object) -> set[str]:
     return set()
 
 
-async def test_performance_records_one_measurement_per_public_storage_call(
+async def test_performance_records_public_storage_query_once(
     store: HealthHistoryStore,
 ) -> None:
-    """Each named public operation contributes exactly one aggregate measurement."""
+    """The public query boundary contributes exactly one read measurement."""
     recorder = PerformanceRecorder()
     operation = recorder.begin(
         "current_refresh",
@@ -130,15 +130,49 @@ async def test_performance_records_one_measurement_per_public_storage_call(
         summary = summary_for("2042-07-12")
         await store.async_upsert(summary)
         assert await store.async_query(summary.date, summary.date) == [summary]
-        await store.async_set_backfill_checkpoint(date(2042, 7, 1))
-        await store.async_checkpoint_expanded(summary, date(2042, 7, 12))
     finally:
         operation.finish("success")
         operation.deactivate(token)
 
     record = recorder.snapshot()[0]
     assert record.storage_read_count == 1
-    assert record.storage_write_count == 3
+
+
+@pytest.mark.parametrize(
+    "write_operation",
+    (
+        "async_upsert",
+        "async_set_backfill_checkpoint",
+        "async_checkpoint_expanded",
+    ),
+)
+async def test_performance_records_each_public_storage_write_once(
+    store: HealthHistoryStore,
+    write_operation: str,
+) -> None:
+    """Each named public write boundary independently contributes one measurement."""
+    recorder = PerformanceRecorder()
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=(),
+    )
+    assert operation is not None
+    token = operation.activate()
+    try:
+        summary = summary_for("2042-07-12")
+        if write_operation == "async_upsert":
+            await store.async_upsert(summary)
+        elif write_operation == "async_set_backfill_checkpoint":
+            await store.async_set_backfill_checkpoint(date(2042, 7, 1))
+        else:
+            await store.async_checkpoint_expanded(summary, date(2042, 7, 12))
+    finally:
+        operation.finish("success")
+        operation.deactivate(token)
+
+    record = recorder.snapshot()[0]
+    assert record.storage_write_count == 1
 
 
 async def test_performance_timing_preserves_history_store_error(
@@ -239,11 +273,54 @@ async def test_timing_clock_failure_does_not_mask_storage_result(
         operation.deactivate(token)
 
 
-async def test_timing_clock_failure_does_not_mask_cancellation(
+async def test_timing_start_cancellation_does_not_mask_storage_result(
     store: HealthHistoryStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A clock failure in a cancelled operation cannot replace cancellation."""
+    """A cancellation raised by the timing clock is only a telemetry failure."""
+    def cancelled_perf_counter() -> float:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(storage_module, "perf_counter", cancelled_perf_counter)
+
+    assert await store.async_query(date(2042, 7, 12), date(2042, 7, 12)) == []
+
+
+async def test_timing_start_cancellation_does_not_mask_history_store_error(
+    hass,
+    store: HealthHistoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timing cancellation cannot replace an error raised by the storage operation."""
+    await Store[dict[str, object]](hass, 1, store.key).async_save({"schema_version": 99})
+
+    def cancelled_perf_counter() -> float:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(storage_module, "perf_counter", cancelled_perf_counter)
+
+    with pytest.raises(HistoryStoreError, match="unsupported history schema"):
+        await store.async_query(date(2042, 7, 12), date(2042, 7, 12))
+
+
+async def test_timing_recording_cancellation_does_not_mask_storage_result(
+    store: HealthHistoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancellation raised while recording is only a telemetry failure."""
+    def cancelled_recording(_duration: object) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(storage_module, "record_storage_read", cancelled_recording)
+
+    assert await store.async_query(date(2042, 7, 12), date(2042, 7, 12)) == []
+
+
+async def test_timing_end_clock_failure_preserves_storage_operation_cancellation(
+    store: HealthHistoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Genuine task cancellation survives an observational end-clock failure."""
     await store.async_load()
     await store._lock.acquire()
     calls = 0
@@ -274,6 +351,8 @@ async def test_timing_clock_failure_does_not_mask_cancellation(
         store._lock.release()
         operation.finish("cancelled")
         operation.deactivate(token)
+
+
 def _summary_payload(summary: DailySummary) -> dict[str, object]:
     """Return a deliberately explicit persisted v1 summary fixture."""
     return {
