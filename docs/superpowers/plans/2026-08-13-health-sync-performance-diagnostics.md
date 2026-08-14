@@ -569,4 +569,4 @@ Home Assistant deployment or restart occurred.
 
 Invoke `superpowers:requesting-code-review` against the feature diff. Resolve
 only confirmed findings with TDD. Do not change the manifest version, tag,
-push, or publish until Russ separately approves the beta release step.
+push, or publish until the maintainer separately approves the beta release step.
