@@ -51,6 +51,7 @@ from custom_components.resiyhome_health_sync.models import (
     DailySummary,
     ExpandedDailyMetrics,
 )
+from custom_components.resiyhome_health_sync.performance import PerformanceRecorder
 from custom_components.resiyhome_health_sync.storage import (
     HealthHistoryStore,
     HistoryStoreError,
@@ -172,7 +173,7 @@ def _lifecycle_patches(*, refresh_error: Exception | None = None):
     )
 
 
-async def test_setup_loads_history_refreshes_then_forwards_and_starts_backfill(hass) -> None:
+async def test_setup_recorder_starts_backfill(hass) -> None:
     """Platforms and backfill start only after cached history and current data exist."""
     entry = _entry(hass)
     client, history, coordinator, patches = _lifecycle_patches()
@@ -188,7 +189,7 @@ async def test_setup_loads_history_refreshes_then_forwards_and_starts_backfill(h
     with (
         patches[0],
         patches[1],
-        patches[2],
+        patches[2] as coordinator_class,
         patch.object(
             hass.config_entries, "async_forward_entry_setups", side_effect=forward
         ) as forward_mock,
@@ -202,6 +203,8 @@ async def test_setup_loads_history_refreshes_then_forwards_and_starts_backfill(h
     assert entry.runtime_data.client is client
     assert entry.runtime_data.history is history
     assert entry.runtime_data.coordinator is coordinator
+    assert isinstance(entry.runtime_data.performance, PerformanceRecorder)
+    assert coordinator_class.call_args.kwargs["performance"] is entry.runtime_data.performance
     history.async_shutdown.assert_not_awaited()
 
 
@@ -670,7 +673,7 @@ async def test_background_backfill_continues_until_expanded_history_is_complete(
     coordinator.async_backfill_step.assert_awaited_once()
 
 
-async def test_two_entries_isolate_token_callbacks_and_history_namespaces(hass) -> None:
+async def test_two_entries_isolate_recorder_token_callbacks_and_history_namespaces(hass) -> None:
     """One person's refresh cannot update another person's tokens or history key."""
     sample_alpha = _entry(hass)
     sample_beta = _entry(hass, person_name="Sample Beta", person_slug="sample_beta")
@@ -718,6 +721,13 @@ async def test_two_entries_isolate_token_callbacks_and_history_namespaces(hass) 
         == f"resiyhome_health_sync.{sample_beta.entry_id}.history"
     )
     assert sample_alpha.runtime_data.history.key != sample_beta.runtime_data.history.key
+    first_recorder = sample_alpha.runtime_data.performance
+    second_recorder = sample_beta.runtime_data.performance
+    assert isinstance(first_recorder, PerformanceRecorder)
+    assert isinstance(second_recorder, PerformanceRecorder)
+    assert first_recorder is not second_recorder
+    assert first_recorder.snapshot() == ()
+    assert second_recorder.snapshot() == ()
 
 
 async def test_config_entry_manager_setup_and_unload_cleans_runtime_and_task(hass) -> None:
@@ -741,9 +751,18 @@ async def test_config_entry_manager_setup_and_unload_cleans_runtime_and_task(has
         assert entry.state is config_entries.ConfigEntryState.LOADED
         assert entry.runtime_data.backfill_task is not None
         assert entry.runtime_data.backfill_task.done()
+        first_recorder = entry.runtime_data.performance
+        assert isinstance(first_recorder, PerformanceRecorder)
+        assert first_recorder.snapshot() == ()
         assert hass.services.has_service(DOMAIN, "refresh")
         assert hass.services.has_service(DOMAIN, "probe_optional_data_types")
 
+        assert await hass.config_entries.async_unload(entry.entry_id) is True
+
+        assert await hass.config_entries.async_setup(entry.entry_id) is True
+        await hass.async_block_till_done()
+        assert entry.runtime_data.performance is not first_recorder
+        assert entry.runtime_data.performance.snapshot() == ()
         assert await hass.config_entries.async_unload(entry.entry_id) is True
 
     assert entry.state is config_entries.ConfigEntryState.NOT_LOADED

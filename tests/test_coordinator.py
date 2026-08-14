@@ -32,6 +32,8 @@ from custom_components.resiyhome_health_sync.models import (
     ExpandedDailyMetrics,
     SourceKind,
 )
+from custom_components.resiyhome_health_sync.performance import PerformanceRecorder
+from custom_components.resiyhome_health_sync.storage import HistoryStoreError
 
 
 def _interval_point(day: date, payload_key: str, value_key: str, value: object) -> dict:
@@ -488,6 +490,140 @@ def coordinator(hass, client: FakeClient, store: FakeStore, now: datetime):
 
 def test_coordinator_uses_fifteen_minute_polling(coordinator) -> None:
     assert coordinator.update_interval == SCAN_INTERVAL
+
+
+async def test_current_refresh_performance_records_each_public_refresh_path_once(
+    hass, client: FakeClient, store: FakeStore, now: datetime
+) -> None:
+    """A missing outer lifecycle wrapper would omit or duplicate public refresh records."""
+    recorder = PerformanceRecorder()
+    client.scope_grant = validate_granted_scopes(
+        (*BASE_SCOPES, NUTRITION_SCOPE), {"include_nutrition": True}
+    )
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        store,
+        performance=recorder,
+        now=lambda: now,
+    )
+
+    await coordinator.async_refresh_current()
+    await coordinator.async_manual_refresh()
+    await coordinator.async_manual_refresh()
+    await coordinator._async_update_data()
+
+    records = recorder.snapshot()
+    assert [record.operation for record in records] == [
+        "current_refresh",
+        "current_refresh",
+        "current_refresh",
+        "current_refresh",
+    ]
+    assert all(record.outcome == "success" for record in records)
+    assert all(record.backfill_active is True for record in records)
+    assert all(
+        record.enabled_capabilities
+        == (
+            CapabilityId.CORE_ACTIVITY,
+            CapabilityId.NUTRITION,
+            CapabilityId.SLEEP,
+        )
+        for record in records
+    )
+
+
+async def test_backfill_performance_records_one_combined_step_and_all_lock_wait(
+    hass, client: FakeClient, store: FakeStore, now: datetime, monkeypatch
+) -> None:
+    """Splitting the operation or timing only one lock would hide backfill queue time."""
+    recorder = PerformanceRecorder()
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        store,
+        performance=recorder,
+        now=lambda: now,
+    )
+    ticks = iter((10.0, 10.011, 10.011, 10.036))
+    monkeypatch.setattr(
+        "custom_components.resiyhome_health_sync.coordinator._performance_monotonic",
+        lambda: next(ticks),
+    )
+
+    await coordinator.async_backfill_step()
+
+    records = recorder.snapshot()
+    assert len(records) == 1
+    assert records[0].operation == "backfill_step"
+    assert records[0].outcome == "success"
+    assert records[0].backfill_active is True
+    assert records[0].queued_wait_duration_ms == 36
+
+
+@pytest.mark.parametrize(
+    ("failure", "outcome"),
+    [
+        (AuthenticationError("authorization failed"), "authorization_error"),
+        (UpdateFailed("temporary failure"), "temporary_error"),
+        (HistoryStoreError("storage failure"), "storage_error"),
+    ],
+)
+async def test_current_refresh_performance_records_propagated_failure_outcomes(
+    hass,
+    client: FakeClient,
+    store: FakeStore,
+    now: datetime,
+    failure: Exception,
+    outcome: str,
+) -> None:
+    """Changing an outcome mapping must not alter the original refresh failure."""
+    recorder = PerformanceRecorder()
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        store,
+        performance=recorder,
+        now=lambda: now,
+    )
+    if isinstance(failure, HistoryStoreError):
+        async def raise_storage_error(_summary) -> None:
+            raise failure
+
+        store.async_upsert = raise_storage_error
+    else:
+        for data_type in coordinator.data_types:
+            for source_family in ("raw", "all-sources", "google-wearables"):
+                client.failures[(source_family, data_type)] = failure
+
+    with pytest.raises(type(failure)):
+        await coordinator.async_refresh_current()
+
+    assert recorder.snapshot()[0].outcome == outcome
+
+
+async def test_current_refresh_performance_records_cancelled_without_swallowing_it(
+    hass, client: FakeClient, store: FakeStore, now: datetime
+) -> None:
+    """Removing cancellation handling would either leak no record or suppress cancellation."""
+    recorder = PerformanceRecorder()
+    store.upsert_committed = asyncio.Event()
+    store.release_upsert = asyncio.Event()
+    coordinator = HealthSyncCoordinator(
+        hass,
+        client,
+        store,
+        performance=recorder,
+        now=lambda: now,
+    )
+
+    refresh = hass.async_create_task(coordinator.async_refresh_current())
+    await store.upsert_committed.wait()
+    refresh.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await refresh
+
+    assert recorder.snapshot()[0].outcome == "cancelled"
 
 
 async def test_manual_refresh_has_five_minute_cooldown(
