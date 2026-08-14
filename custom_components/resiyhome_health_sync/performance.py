@@ -17,17 +17,15 @@ OPERATIONS = frozenset({"current_refresh", "backfill_step"})
 OUTCOMES = frozenset(
     {"success", "temporary_error", "authorization_error", "storage_error", "cancelled"}
 )
-PHASES = frozenset(
-    {"google_requests", "storage_reads", "storage_writes", "coordinator_wait", "other"}
-)
-RECORD_LIMIT = 12
-_PHASE_ORDER = (
+PHASE_ORDER = (
     "google_requests",
     "storage_reads",
     "storage_writes",
     "coordinator_wait",
     "other",
 )
+PHASES = frozenset(PHASE_ORDER)
+RECORD_LIMIT = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,7 +201,7 @@ class PerformanceOperation:
         }
         other_duration = max(0, total_duration - sum(phase_durations.values()))
         phase_durations["other"] = other_duration
-        slowest_phase = max(_PHASE_ORDER, key=phase_durations.__getitem__)
+        slowest_phase = max(PHASE_ORDER, key=phase_durations.__getitem__)
         self._recorder._append(
             PerformanceRecord(
                 operation=self._operation,

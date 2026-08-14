@@ -13,7 +13,14 @@ from homeassistant.core import HomeAssistant
 from .capabilities import CAPABILITIES, CapabilityId, ScopeGrant
 from .const import SCAN_INTERVAL
 from .models import CapabilityRefreshState, CoordinatorSnapshot, DailySummary
-from .performance import PHASES, RECORD_LIMIT, PerformanceRecord
+from .performance import (
+    OPERATIONS,
+    OUTCOMES,
+    PHASE_ORDER,
+    PHASES,
+    RECORD_LIMIT,
+    PerformanceRecord,
+)
 
 _SENSITIVE_KEY_TOKENS = frozenset(
     {
@@ -144,13 +151,6 @@ _SAFE_CATEGORY_KEY_SUFFIXES = frozenset(
 _SAFE_TIMESTAMP_KEY_SUFFIXES = frozenset(
     {"at", "attempt", "cursor", "date", "end", "start", "success", "timestamp"}
 )
-_PERFORMANCE_PHASE_ORDER = (
-    "google_requests",
-    "storage_reads",
-    "storage_writes",
-    "coordinator_wait",
-    "other",
-)
 _SAFE_PERFORMANCE_INTEGER_KEY_TOKENS = frozenset(
     {
         ("polling", "interval", "minutes"),
@@ -173,18 +173,8 @@ _SAFE_PERFORMANCE_INTEGER_KEY_TOKENS = frozenset(
     }
 )
 _SAFE_PERFORMANCE_STRING_VALUES = {
-    ("operation",): frozenset({"current_refresh", "backfill_step"}),
-    (
-        "outcome",
-    ): frozenset(
-        {
-            "success",
-            "temporary_error",
-            "authorization_error",
-            "storage_error",
-            "cancelled",
-        }
-    ),
+    ("operation",): OPERATIONS,
+    ("outcome",): OUTCOMES,
     ("slowest", "phase"): PHASES,
     ("most", "frequent", "slowest", "phase"): PHASES,
     ("enabled", "capabilities"): frozenset(
@@ -326,32 +316,41 @@ def _summarize_performance(
     records: tuple[PerformanceRecord, ...], snapshot: CoordinatorSnapshot
 ) -> dict[str, object]:
     """Return a bounded, value-free performance summary from recorder snapshots."""
-    count = len(records)
+    ordered_records = tuple(sorted(records, key=lambda record: record.started_at))
+    count = len(ordered_records)
     successful_operation_count = sum(
-        getattr(record, "outcome", None) == "success" for record in records
+        getattr(record, "outcome", None) == "success" for record in ordered_records
     )
     phase_counts = {
         phase: sum(
-            getattr(record, "slowest_phase", None) == phase for record in records
+            getattr(record, "slowest_phase", None) == phase
+            for record in ordered_records
         )
-        for phase in _PERFORMANCE_PHASE_ORDER
+        for phase in PHASE_ORDER
     }
     values = {
-        "duration_ms": [_performance_int(record, "duration_ms") for record in records],
+        "duration_ms": [
+            _performance_int(record, "duration_ms") for record in ordered_records
+        ],
         "google_request_count": [
-            _performance_int(record, "google_request_count") for record in records
+            _performance_int(record, "google_request_count")
+            for record in ordered_records
         ],
         "google_request_duration_ms": [
-            _performance_int(record, "google_request_duration_ms") for record in records
+            _performance_int(record, "google_request_duration_ms")
+            for record in ordered_records
         ],
         "storage_read_duration_ms": [
-            _performance_int(record, "storage_read_duration_ms") for record in records
+            _performance_int(record, "storage_read_duration_ms")
+            for record in ordered_records
         ],
         "storage_write_duration_ms": [
-            _performance_int(record, "storage_write_duration_ms") for record in records
+            _performance_int(record, "storage_write_duration_ms")
+            for record in ordered_records
         ],
         "queued_wait_duration_ms": [
-            _performance_int(record, "queued_wait_duration_ms") for record in records
+            _performance_int(record, "queued_wait_duration_ms")
+            for record in ordered_records
         ],
     }
     summary: dict[str, object] = {
@@ -390,7 +389,7 @@ def _summarize_performance(
             values["queued_wait_duration_ms"]
         ),
         "most_frequent_slowest_phase": (
-            max(_PERFORMANCE_PHASE_ORDER, key=phase_counts.__getitem__)
+            max(PHASE_ORDER, key=phase_counts.__getitem__)
             if any(phase_counts.values())
             else None
         ),
@@ -403,7 +402,7 @@ def _summarize_performance(
         "record_count": count,
         "summary": summary,
         "recent_operations": [
-            _performance_diagnostics_record(record) for record in records
+            _performance_diagnostics_record(record) for record in ordered_records
         ],
     }
 

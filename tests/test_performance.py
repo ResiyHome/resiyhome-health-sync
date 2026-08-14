@@ -10,6 +10,8 @@ from custom_components.resiyhome_health_sync.capabilities import CapabilityId
 from custom_components.resiyhome_health_sync.performance import (
     OPERATIONS,
     OUTCOMES,
+    PHASE_ORDER,
+    PHASES,
     PerformanceOperation,
     PerformanceRecorder,
     record_google_request,
@@ -29,6 +31,25 @@ class Clock:
 
     def advance(self, seconds: float) -> None:
         self.value += seconds
+
+
+def test_performance_phase_policy_has_one_ordered_source_of_truth() -> None:
+    """Phase membership and tie behavior are derived from the exported order."""
+    clock = Clock()
+    recorder = PerformanceRecorder(monotonic=clock)
+    operation = recorder.begin(
+        "current_refresh",
+        backfill_active=False,
+        enabled_capabilities=(),
+        started_at=NOW,
+    )
+    operation.add_google_request(0.100)
+    operation.add_storage_read(0.100)
+    clock.advance(0.200)
+    operation.finish("success")
+
+    assert PHASES == frozenset(PHASE_ORDER)
+    assert recorder.snapshot()[0].slowest_phase == PHASE_ORDER[0]
 
 
 def test_recorder_collects_only_allowlisted_bounded_operation_data() -> None:

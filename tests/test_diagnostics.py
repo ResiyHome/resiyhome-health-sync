@@ -227,14 +227,23 @@ async def test_diagnostics_performance_empty_records_use_explicit_zero_and_nulls
     }
 
 
-async def test_diagnostics_performance_uses_stable_phase_ties_and_snapshot_order(hass) -> None:
-    """Tied phase counts use documented phase order without resorting the snapshot."""
+async def test_diagnostics_performance_orders_by_start_time_with_stable_ties(hass) -> None:
+    """Download-time ordering is chronological and preserves equal-start input order."""
     records = (
         _performance_record(
-            started_at=NOW + timedelta(minutes=30), slowest_phase="storage_reads"
+            started_at=NOW + timedelta(minutes=30),
+            duration_ms=300,
+            slowest_phase="storage_reads",
         ),
         _performance_record(
-            started_at=NOW, slowest_phase="google_requests"
+            started_at=NOW,
+            duration_ms=100,
+            slowest_phase="google_requests",
+        ),
+        _performance_record(
+            started_at=NOW,
+            duration_ms=200,
+            slowest_phase="other",
         ),
     )
     entry = _performance_entry(records)
@@ -245,8 +254,9 @@ async def test_diagnostics_performance_uses_stable_phase_ties_and_snapshot_order
         "google_requests"
     )
     assert result["performance"]["recent_operations"] == [
-        records[0].to_diagnostics(),
         records[1].to_diagnostics(),
+        records[2].to_diagnostics(),
+        records[0].to_diagnostics(),
     ]
 
 
@@ -258,6 +268,7 @@ async def test_diagnostics_performance_recursively_redacts_injected_snapshot_dat
         record,
         MagicMock(
             operation="current_refresh",
+            started_at=NOW + timedelta(minutes=15),
             duration_ms=100,
             google_request_count=1,
             google_request_duration_ms=1,
