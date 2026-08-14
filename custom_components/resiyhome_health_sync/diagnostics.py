@@ -11,7 +11,9 @@ from homeassistant.components.diagnostics import REDACTED
 from homeassistant.core import HomeAssistant
 
 from .capabilities import CAPABILITIES, CapabilityId, ScopeGrant
+from .const import SCAN_INTERVAL
 from .models import CapabilityRefreshState, CoordinatorSnapshot, DailySummary
+from .performance import PHASES, RECORD_LIMIT, PerformanceRecord
 
 _SENSITIVE_KEY_TOKENS = frozenset(
     {
@@ -142,6 +144,53 @@ _SAFE_CATEGORY_KEY_SUFFIXES = frozenset(
 _SAFE_TIMESTAMP_KEY_SUFFIXES = frozenset(
     {"at", "attempt", "cursor", "date", "end", "start", "success", "timestamp"}
 )
+_PERFORMANCE_PHASE_ORDER = (
+    "google_requests",
+    "storage_reads",
+    "storage_writes",
+    "coordinator_wait",
+    "other",
+)
+_SAFE_PERFORMANCE_INTEGER_KEY_TOKENS = frozenset(
+    {
+        ("polling", "interval", "minutes"),
+        ("record", "limit"),
+        ("duration", "ms"),
+        ("google", "request", "duration", "ms"),
+        ("storage", "read", "duration", "ms"),
+        ("storage", "write", "duration", "ms"),
+        ("queued", "wait", "duration", "ms"),
+        ("average", "duration", "ms"),
+        ("maximum", "duration", "ms"),
+        ("average", "google", "request", "duration", "ms"),
+        ("maximum", "google", "request", "duration", "ms"),
+        ("average", "storage", "read", "duration", "ms"),
+        ("maximum", "storage", "read", "duration", "ms"),
+        ("average", "storage", "write", "duration", "ms"),
+        ("maximum", "storage", "write", "duration", "ms"),
+        ("average", "coordinator", "wait", "duration", "ms"),
+        ("maximum", "coordinator", "wait", "duration", "ms"),
+    }
+)
+_SAFE_PERFORMANCE_STRING_VALUES = {
+    ("operation",): frozenset({"current_refresh", "backfill_step"}),
+    (
+        "outcome",
+    ): frozenset(
+        {
+            "success",
+            "temporary_error",
+            "authorization_error",
+            "storage_error",
+            "cancelled",
+        }
+    ),
+    ("slowest", "phase"): PHASES,
+    ("most", "frequent", "slowest", "phase"): PHASES,
+    ("enabled", "capabilities"): frozenset(
+        capability.value for capability in CapabilityId
+    ),
+}
 _CORE_DAILY_METRICS = (
     "steps",
     "fitbit_steps",
@@ -233,6 +282,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: Any) ->
     coordinator = entry.runtime_data.coordinator
     history = entry.runtime_data.history
     scope_grant = entry.runtime_data.scope_grant
+    performance_records = entry.runtime_data.performance.snapshot()
     current = coordinator.data.current_day
     rows: list[DailySummary] = []
     if current is not None:
@@ -267,8 +317,117 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: Any) ->
             "expanded_cursor": _iso(coordinator.data.expanded_backfill_cursor),
             "expanded_complete": coordinator.data.expanded_backfill_complete,
         },
+        "performance": _summarize_performance(performance_records, coordinator.data),
     }
     return cast(dict[str, object], _redact_recursive(result))
+
+
+def _summarize_performance(
+    records: tuple[PerformanceRecord, ...], snapshot: CoordinatorSnapshot
+) -> dict[str, object]:
+    """Return a bounded, value-free performance summary from recorder snapshots."""
+    count = len(records)
+    successful_operation_count = sum(
+        getattr(record, "outcome", None) == "success" for record in records
+    )
+    phase_counts = {
+        phase: sum(
+            getattr(record, "slowest_phase", None) == phase for record in records
+        )
+        for phase in _PERFORMANCE_PHASE_ORDER
+    }
+    values = {
+        "duration_ms": [_performance_int(record, "duration_ms") for record in records],
+        "google_request_count": [
+            _performance_int(record, "google_request_count") for record in records
+        ],
+        "google_request_duration_ms": [
+            _performance_int(record, "google_request_duration_ms") for record in records
+        ],
+        "storage_read_duration_ms": [
+            _performance_int(record, "storage_read_duration_ms") for record in records
+        ],
+        "storage_write_duration_ms": [
+            _performance_int(record, "storage_write_duration_ms") for record in records
+        ],
+        "queued_wait_duration_ms": [
+            _performance_int(record, "queued_wait_duration_ms") for record in records
+        ],
+    }
+    summary: dict[str, object] = {
+        "successful_operation_count": successful_operation_count,
+        "failed_operation_count": count - successful_operation_count,
+        "average_duration_ms": _performance_average(values["duration_ms"]),
+        "maximum_duration_ms": _performance_maximum(values["duration_ms"]),
+        "average_google_request_count": _performance_average(
+            values["google_request_count"]
+        ),
+        "maximum_google_request_count": _performance_maximum(
+            values["google_request_count"]
+        ),
+        "average_google_request_duration_ms": _performance_average(
+            values["google_request_duration_ms"]
+        ),
+        "maximum_google_request_duration_ms": _performance_maximum(
+            values["google_request_duration_ms"]
+        ),
+        "average_storage_read_duration_ms": _performance_average(
+            values["storage_read_duration_ms"]
+        ),
+        "maximum_storage_read_duration_ms": _performance_maximum(
+            values["storage_read_duration_ms"]
+        ),
+        "average_storage_write_duration_ms": _performance_average(
+            values["storage_write_duration_ms"]
+        ),
+        "maximum_storage_write_duration_ms": _performance_maximum(
+            values["storage_write_duration_ms"]
+        ),
+        "average_coordinator_wait_duration_ms": _performance_average(
+            values["queued_wait_duration_ms"]
+        ),
+        "maximum_coordinator_wait_duration_ms": _performance_maximum(
+            values["queued_wait_duration_ms"]
+        ),
+        "most_frequent_slowest_phase": (
+            max(_PERFORMANCE_PHASE_ORDER, key=phase_counts.__getitem__)
+            if any(phase_counts.values())
+            else None
+        ),
+        "core_backfill_complete": snapshot.backfill_complete,
+        "expanded_backfill_complete": snapshot.expanded_backfill_complete,
+    }
+    return {
+        "polling_interval_minutes": int(SCAN_INTERVAL.total_seconds() // 60),
+        "record_limit": RECORD_LIMIT,
+        "record_count": count,
+        "summary": summary,
+        "recent_operations": [
+            _performance_diagnostics_record(record) for record in records
+        ],
+    }
+
+
+def _performance_int(record: PerformanceRecord, field: str) -> int:
+    value = getattr(record, field, 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _performance_average(values: list[int]) -> int | None:
+    return sum(values) // len(values) if values else None
+
+
+def _performance_maximum(values: list[int]) -> int | None:
+    return max(values) if values else None
+
+
+def _performance_diagnostics_record(record: PerformanceRecord) -> dict[str, object]:
+    """Serialize a recorder item without letting a malformed snapshot escape diagnostics."""
+    try:
+        value = record.to_diagnostics()
+    except (AttributeError, TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _summarize_day(
@@ -481,7 +640,10 @@ def _sanitize_scalar(value: Any, key_tokens: tuple[str, ...]) -> Any:
         return value
     if isinstance(value, (date, datetime)):
         return value.isoformat() if _is_timestamp_key(key_tokens) else REDACTED
-    if isinstance(value, int) and _is_count_or_status_key(key_tokens):
+    if isinstance(value, int) and (
+        _is_count_or_status_key(key_tokens)
+        or key_tokens in _SAFE_PERFORMANCE_INTEGER_KEY_TOKENS
+    ):
         return value
     if isinstance(value, str):
         if value == REDACTED:
@@ -489,6 +651,8 @@ def _sanitize_scalar(value: Any, key_tokens: tuple[str, ...]) -> Any:
         if _is_category_key(key_tokens) and value.casefold() in _SAFE_CATEGORIES:
             return value
         if _is_timestamp_key(key_tokens) and _is_iso_date_or_datetime(value):
+            return value
+        if value in _SAFE_PERFORMANCE_STRING_VALUES.get(key_tokens, frozenset()):
             return value
     return REDACTED
 

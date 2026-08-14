@@ -1,6 +1,6 @@
 """Tests for redacted Health Sync diagnostics."""
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -30,6 +30,7 @@ from custom_components.resiyhome_health_sync.models import (
     SourceKind,
     WorkoutSummary,
 )
+from custom_components.resiyhome_health_sync.performance import PerformanceRecord
 
 NOW = datetime(2042, 7, 13, 12, 0, tzinfo=UTC)
 FORBIDDEN = (
@@ -91,6 +92,202 @@ def _summary() -> DailySummary:
         complete=False,
         updated_at=NOW,
     )
+
+
+def _performance_record(
+    *,
+    started_at: datetime = NOW,
+    duration_ms: int = 250,
+    google_request_count: int = 10,
+    google_request_duration_ms: int = 150,
+    storage_read_duration_ms: int = 15,
+    storage_write_duration_ms: int = 20,
+    queued_wait_duration_ms: int = 0,
+    outcome: str = "success",
+    slowest_phase: str = "google_requests",
+) -> PerformanceRecord:
+    """Create an allowlisted completed operation record for diagnostics tests."""
+    return PerformanceRecord(
+        operation="current_refresh",
+        started_at=started_at,
+        duration_ms=duration_ms,
+        google_request_count=google_request_count,
+        google_request_duration_ms=google_request_duration_ms,
+        storage_read_count=1,
+        storage_read_duration_ms=storage_read_duration_ms,
+        storage_write_count=1,
+        storage_write_duration_ms=storage_write_duration_ms,
+        queued_wait_duration_ms=queued_wait_duration_ms,
+        backfill_active=False,
+        enabled_capabilities=(CapabilityId.CORE_ACTIVITY,),
+        outcome=outcome,
+        slowest_phase=slowest_phase,
+        other_duration_ms=0,
+    )
+
+
+def _performance_entry(records: tuple[PerformanceRecord, ...]) -> MagicMock:
+    """Return a loaded entry with only the runtime dependencies diagnostics needs."""
+    entry = MagicMock()
+    entry.options = {}
+    entry.runtime_data.performance.snapshot.return_value = records
+    entry.runtime_data.history.async_query = AsyncMock(return_value=[])
+    entry.runtime_data.coordinator.data = CoordinatorSnapshot(
+        current_day=None,
+        backfill_complete=True,
+        expanded_backfill_complete=False,
+    )
+    entry.runtime_data.coordinator.data_types = ()
+    entry.runtime_data.coordinator.is_stale = False
+    entry.runtime_data.scope_grant = validate_granted_scopes(BASE_SCOPES, {})
+    return entry
+
+
+async def test_diagnostics_summarizes_bounded_performance_only_when_downloaded(hass) -> None:
+    """A downloaded report summarizes its immutable recorder snapshot with floor averages."""
+    records = (
+        _performance_record(),
+        _performance_record(
+            started_at=NOW + timedelta(minutes=15),
+            duration_ms=500,
+            google_request_count=14,
+            google_request_duration_ms=250,
+            storage_read_duration_ms=25,
+            storage_write_duration_ms=40,
+            queued_wait_duration_ms=10,
+            outcome="temporary_error",
+        ),
+    )
+    entry = _performance_entry(records)
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert result["performance"] == {
+        "polling_interval_minutes": 15,
+        "record_limit": 12,
+        "record_count": 2,
+        "summary": {
+            "successful_operation_count": 1,
+            "failed_operation_count": 1,
+            # Averages use integer floor division to keep output deterministic.
+            "average_duration_ms": 375,
+            "maximum_duration_ms": 500,
+            "average_google_request_count": 12,
+            "maximum_google_request_count": 14,
+            "average_google_request_duration_ms": 200,
+            "maximum_google_request_duration_ms": 250,
+            "average_storage_read_duration_ms": 20,
+            "maximum_storage_read_duration_ms": 25,
+            "average_storage_write_duration_ms": 30,
+            "maximum_storage_write_duration_ms": 40,
+            "average_coordinator_wait_duration_ms": 5,
+            "maximum_coordinator_wait_duration_ms": 10,
+            "most_frequent_slowest_phase": "google_requests",
+            "core_backfill_complete": True,
+            "expanded_backfill_complete": False,
+        },
+        "recent_operations": [
+            records[0].to_diagnostics(),
+            records[1].to_diagnostics(),
+        ],
+    }
+    entry.runtime_data.performance.snapshot.assert_called_once_with()
+
+
+async def test_diagnostics_performance_empty_records_use_explicit_zero_and_nulls(hass) -> None:
+    """An entry with no completed measurements avoids implied performance values."""
+    entry = _performance_entry(())
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert result["performance"] == {
+        "polling_interval_minutes": 15,
+        "record_limit": 12,
+        "record_count": 0,
+        "summary": {
+            "successful_operation_count": 0,
+            "failed_operation_count": 0,
+            "average_duration_ms": None,
+            "maximum_duration_ms": None,
+            "average_google_request_count": None,
+            "maximum_google_request_count": None,
+            "average_google_request_duration_ms": None,
+            "maximum_google_request_duration_ms": None,
+            "average_storage_read_duration_ms": None,
+            "maximum_storage_read_duration_ms": None,
+            "average_storage_write_duration_ms": None,
+            "maximum_storage_write_duration_ms": None,
+            "average_coordinator_wait_duration_ms": None,
+            "maximum_coordinator_wait_duration_ms": None,
+            "most_frequent_slowest_phase": None,
+            "core_backfill_complete": True,
+            "expanded_backfill_complete": False,
+        },
+        "recent_operations": [],
+    }
+
+
+async def test_diagnostics_performance_uses_stable_phase_ties_and_snapshot_order(hass) -> None:
+    """Tied phase counts use documented phase order without resorting the snapshot."""
+    records = (
+        _performance_record(
+            started_at=NOW + timedelta(minutes=30), slowest_phase="storage_reads"
+        ),
+        _performance_record(
+            started_at=NOW, slowest_phase="google_requests"
+        ),
+    )
+    entry = _performance_entry(records)
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    assert result["performance"]["summary"]["most_frequent_slowest_phase"] == (
+        "google_requests"
+    )
+    assert result["performance"]["recent_operations"] == [
+        records[0].to_diagnostics(),
+        records[1].to_diagnostics(),
+    ]
+
+
+async def test_diagnostics_performance_recursively_redacts_injected_snapshot_data(hass) -> None:
+    """Unsafe injected recorder scalars cannot bypass the final diagnostics gate."""
+    record = _performance_record()
+    entry = _performance_entry((record,))
+    entry.runtime_data.performance.snapshot.return_value = (
+        record,
+        MagicMock(
+            operation="current_refresh",
+            duration_ms=100,
+            google_request_count=1,
+            google_request_duration_ms=1,
+            storage_read_duration_ms=1,
+            storage_write_duration_ms=1,
+            queued_wait_duration_ms=1,
+            outcome="success",
+            slowest_phase="google_requests",
+            to_diagnostics=MagicMock(
+                return_value={
+                    "operation": "private-operation",
+                    "duration_ms": "private-health-value",
+                    "token": "secret-access-token",
+                    "nested": {"raw_payload": "private-google-error"},
+                }
+            ),
+        ),
+    )
+
+    result = await async_get_config_entry_diagnostics(hass, entry)
+
+    performance = result["performance"]
+    exposed = repr(performance)
+    for forbidden in FORBIDDEN:
+        assert forbidden not in exposed
+    assert performance["recent_operations"][1] == {
+        "operation": REDACTED,
+        "duration_ms": REDACTED,
+        "nested": {},
+    }
 
 
 async def test_diagnostics_exposes_health_and_redacts_recursive_secrets(hass) -> None:
