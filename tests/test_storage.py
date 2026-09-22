@@ -452,6 +452,8 @@ def _v3_payload(
                 "sleep_period_minutes": summary.sleep_period_minutes,
                 "sleep_onset_minutes": summary.sleep_onset_minutes,
                 "sleep_after_wake_minutes": summary.sleep_after_wake_minutes,
+                "sleep_start": _optional_isoformat(summary.sleep_start),
+                "sleep_end": _optional_isoformat(summary.sleep_end),
                 "expanded": _expanded_payload(summary.expanded)
                 | {
                     "body_fat_percentage": summary.expanded.body_fat_percentage,
@@ -463,6 +465,10 @@ def _v3_payload(
         "expanded_backfill_cursor": expanded_cursor,
         "body_measurements_enabled": body_measurements_enabled,
     }
+
+
+def _optional_isoformat(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
 
 
 def _legacy_v3_payload(
@@ -552,6 +558,8 @@ async def test_parity_summary_round_trip_preserves_every_additive_field(
         sleep_period_minutes=445.0,
         sleep_onset_minutes=8.0,
         sleep_after_wake_minutes=12.0,
+        sleep_start=datetime(_PARITY_FIXTURE_YEAR, 7, 14, 22, 41, tzinfo=UTC),
+        sleep_end=datetime(_PARITY_FIXTURE_YEAR, 7, 15, 5, 8, tzinfo=timezone(timedelta(hours=2))),
         expanded=ExpandedDailyMetrics(
             body_fat_percentage=21.4,
             height_m=1.778,
@@ -595,6 +603,8 @@ async def test_legacy_schema_v3_loads_additive_fields_as_none_without_rewrite(
     assert row.sleep_period_minutes is None
     assert row.sleep_onset_minutes is None
     assert row.sleep_after_wake_minutes is None
+    assert row.sleep_start is None
+    assert row.sleep_end is None
     assert row.expanded.body_fat_percentage is None
     assert row.expanded.height_m is None
     assert store.backfill_cursor == date(_PARITY_FIXTURE_YEAR, 7, 1)
@@ -613,6 +623,8 @@ def test_additive_model_defaults_preserve_existing_construction() -> None:
     assert row.sleep_period_minutes is None
     assert row.sleep_onset_minutes is None
     assert row.sleep_after_wake_minutes is None
+    assert row.sleep_start is None
+    assert row.sleep_end is None
     assert row.expanded.body_fat_percentage is None
     assert row.expanded.height_m is None
     assert snapshot.latest_body_fat_percentage is None

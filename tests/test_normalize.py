@@ -615,6 +615,15 @@ def test_sleep_period_onset_and_after_wake_use_latest_valid_session() -> None:
     assert result.sleep_period_minutes == 402.0
     assert result.sleep_onset_minutes == 6.0
     assert result.sleep_after_wake_minutes == 12.0
+    assert result.sleep_start == datetime.fromisoformat("2042-07-13T04:00:00+00:00")
+    assert result.sleep_end == datetime.fromisoformat("2042-07-13T11:00:00+00:00")
+
+
+def test_sleep_start_and_end_are_none_without_valid_session() -> None:
+    result = normalize_day(date(2042, 7, 13), {}, {}, {})
+
+    assert result.sleep_start is None
+    assert result.sleep_end is None
 
 
 def test_sleep_onset_and_after_wake_preserve_true_zero() -> None:

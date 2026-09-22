@@ -98,6 +98,8 @@ class DailySummary:
     sleep_period_minutes: float | None = None
     sleep_onset_minutes: float | None = None
     sleep_after_wake_minutes: float | None = None
+    sleep_start: datetime | None = None
+    sleep_end: datetime | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sleep_stages", MappingProxyType(dict(self.sleep_stages)))

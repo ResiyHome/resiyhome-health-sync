@@ -137,6 +137,7 @@ PARITY_PERSON_SENSOR_KEYS = frozenset(
         "water_consumed_today",
     }
 )
+SLEEP_TIMING_SENSOR_KEYS = frozenset({"sleep_start", "sleep_end"})
 
 
 def _state(hass, entity_id: str):
@@ -382,7 +383,10 @@ async def test_pre_parity_sensor_unique_ids_remain_stable(sample_alpha) -> None:
 
 def test_exactly_eight_additive_person_sensor_descriptions() -> None:
     descriptions = {description.key: description for description in SENSOR_DESCRIPTIONS}
-    assert descriptions.keys() - PRE_PARITY_SENSOR_KEYS == PARITY_PERSON_SENSOR_KEYS
+    assert (
+        descriptions.keys() - PRE_PARITY_SENSOR_KEYS - SLEEP_TIMING_SENSOR_KEYS
+        == PARITY_PERSON_SENSOR_KEYS
+    )
 
     expected_contracts = {
         "total_calories_burned_today": (
@@ -456,6 +460,25 @@ def test_exactly_eight_additive_person_sensor_descriptions() -> None:
         assert description.required_capability is capability
         assert description.entity_registry_enabled_default is enabled_default
         assert description.translation_key == key
+
+
+def test_sleep_start_and_end_sensors_expose_latest_session_timestamps() -> None:
+    descriptions = {description.key: description for description in SENSOR_DESCRIPTIONS}
+    start = datetime(2042, 7, 11, 22, 41, tzinfo=UTC)
+    end = datetime(2042, 7, 12, 5, 8, tzinfo=UTC)
+    snapshot = CoordinatorSnapshot(
+        current_day=replace(_summary(), sleep_start=start, sleep_end=end)
+    )
+
+    for key, expected in (("sleep_start", start), ("sleep_end", end)):
+        description = descriptions[key]
+        assert description.device_class == SensorDeviceClass.TIMESTAMP
+        assert description.state_class is None
+        assert description.native_unit_of_measurement is None
+        assert description.required_capability is CapabilityId.SLEEP
+        assert description.translation_key == key
+        assert description.value_fn(snapshot) == expected
+        assert description.value_fn(CoordinatorSnapshot()) is None
 
 
 def test_additive_person_sensor_values_and_measurement_dates_are_exact() -> None:
@@ -684,6 +707,8 @@ def test_new_sensor_translations_match_strings() -> None:
         "sleep_time_in_bed": {"name": "Sleep time in bed"},
         "sleep_time_to_fall_asleep": {"name": "Sleep time to fall asleep"},
         "sleep_time_after_waking": {"name": "Sleep time after waking"},
+        "sleep_start": {"name": "Sleep start"},
+        "sleep_end": {"name": "Sleep end"},
         "body_fat": {"name": "Body fat"},
         "height": {"name": "Height"},
         "calories_consumed_today": {"name": "Calories consumed today"},

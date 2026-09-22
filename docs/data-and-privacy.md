@@ -56,7 +56,8 @@ The private normalized history store is keyed by the Home Assistant
 config-entry ID. It contains normalized daily summaries, source
 classification, completion metadata, backfill cursors, and the
 body-measurement option state. Additive daily fields include total calories,
-sleep timing, body measurements when enabled, and nutrition values collected
+sleep timing (including the latest sleep session's start and end
+timestamps), body measurements when enabled, and nutrition values collected
 after opt-in. Core history is imported in resumable seven-day windows up to
 Google's 20-year provider boundary. The smaller window keeps high-volume
 heart-rate history within Google Health pagination limits. Expanded metrics

@@ -47,6 +47,8 @@ _SUMMARY_FIELDS = frozenset(
         "sleep_period_minutes",
         "sleep_onset_minutes",
         "sleep_after_wake_minutes",
+        "sleep_start",
+        "sleep_end",
         "sleep_stages",
         "resting_heart_rate",
         "average_heart_rate",
@@ -68,6 +70,8 @@ _SUMMARY_ADDITIVE_FIELDS = frozenset(
         "sleep_period_minutes",
         "sleep_onset_minutes",
         "sleep_after_wake_minutes",
+        "sleep_start",
+        "sleep_end",
     }
 )
 _EXPANDED_FIELDS = frozenset(
@@ -793,6 +797,8 @@ def _serialize_summary(summary: DailySummary) -> dict[str, object]:
         "sleep_after_wake_minutes": _serialize_optional_float(
             summary.sleep_after_wake_minutes, "sleep_after_wake_minutes"
         ),
+        "sleep_start": _serialize_optional_datetime(summary.sleep_start, "sleep_start"),
+        "sleep_end": _serialize_optional_datetime(summary.sleep_end, "sleep_end"),
         "sleep_stages": _serialize_sleep_stages(summary.sleep_stages),
         "resting_heart_rate": _serialize_optional_float(
             summary.resting_heart_rate, "resting_heart_rate"
@@ -859,6 +865,8 @@ def _deserialize_summary(payload: object, expected_day: date) -> DailySummary:
         sleep_after_wake_minutes=_parse_optional_float(
             summary.get("sleep_after_wake_minutes"), "sleep_after_wake_minutes"
         ),
+        sleep_start=_parse_optional_datetime(summary.get("sleep_start"), "sleep_start"),
+        sleep_end=_parse_optional_datetime(summary.get("sleep_end"), "sleep_end"),
         sleep_stages=_deserialize_sleep_stages(summary["sleep_stages"]),
         resting_heart_rate=_parse_optional_float(
             summary["resting_heart_rate"], "resting_heart_rate"
