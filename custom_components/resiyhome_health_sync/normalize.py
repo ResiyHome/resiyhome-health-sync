@@ -22,6 +22,8 @@ class NormalizedSleep:
     period_minutes: float | None
     onset_minutes: float | None
     after_wake_minutes: float | None
+    start: datetime | None = None
+    end: datetime | None = None
 
 
 _INT64_MIN = -(2**63)
@@ -113,6 +115,8 @@ def normalize_day(
         sleep_period_minutes=sleep.period_minutes,
         sleep_onset_minutes=sleep.onset_minutes,
         sleep_after_wake_minutes=sleep.after_wake_minutes,
+        sleep_start=sleep.start,
+        sleep_end=sleep.end,
         resting_heart_rate=_as_float(resting_heart_rate),
         average_heart_rate=heart_rate[0],
         minimum_heart_rate=heart_rate[1],
@@ -441,6 +445,8 @@ def _sleep_session(
             period_minutes=period_minutes,
             onset_minutes=onset_minutes,
             after_wake_minutes=after_wake_minutes,
+            start=start,
+            end=end,
         )
 
     fallback_stages = _sleep_summary_fallback_stages(summary, interval_seconds)

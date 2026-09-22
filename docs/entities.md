@@ -42,6 +42,8 @@ of trackers and scales.
 | `sleep_time_in_bed` | Sleep time in bed | min | Enabled | `minutesInSleepPeriod` from the same latest valid reconciled sleep session |
 | `sleep_time_to_fall_asleep` | Sleep time to fall asleep | min | Enabled | `minutesToFallAsleep` from the same latest valid reconciled sleep session |
 | `sleep_time_after_waking` | Sleep time after waking | min | Enabled | `minutesAfterWakeUp` from the same latest valid reconciled sleep session |
+| `sleep_start` | Sleep start | timestamp | Enabled | Physical `interval.startTime` of the same latest valid reconciled sleep session |
+| `sleep_end` | Sleep end | timestamp | Enabled | Physical `interval.endTime` of the same latest valid reconciled sleep session |
 | `sleep_awake_duration` | Sleep awake duration | min | Enabled | Awake stage from latest valid reconciled sleep session |
 | `sleep_rem_duration` | Sleep REM duration | min | Enabled | REM stage from latest valid reconciled sleep session |
 | `sleep_light_duration` | Sleep light duration | min | Enabled | Light stage from latest valid reconciled sleep session |

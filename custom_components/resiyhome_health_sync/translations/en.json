@@ -70,6 +70,12 @@
       "sleep_time_after_waking": {
         "name": "Sleep time after waking"
       },
+      "sleep_start": {
+        "name": "Sleep start"
+      },
+      "sleep_end": {
+        "name": "Sleep end"
+      },
       "body_fat": {
         "name": "Body fat"
       },

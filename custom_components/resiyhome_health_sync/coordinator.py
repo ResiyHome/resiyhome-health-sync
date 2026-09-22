@@ -178,6 +178,8 @@ _GROUP_FIELDS: Mapping[str, tuple[str, ...]] = {
         "sleep_period_minutes",
         "sleep_onset_minutes",
         "sleep_after_wake_minutes",
+        "sleep_start",
+        "sleep_end",
     ),
     "steps": ("steps", "fitbit_steps"),
 }

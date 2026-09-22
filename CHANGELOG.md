@@ -2,6 +2,23 @@
 
 All notable public changes to Health Sync by ResiyHome are recorded here.
 
+## Unreleased
+
+### Added
+
+- Added `sleep_start` and `sleep_end` timestamp sensors for the latest valid
+  reconciled sleep session. They come from the session's physical interval,
+  which Health Sync already reads to pick the latest session.
+
+### Safety And Compatibility
+
+- No new Google requests, data types, or OAuth scopes. No reauthorization is
+  required.
+- The normalized history store gains two optional (additive) summary fields at
+  schema version 3. Existing rows load with both values as `None` and are not
+  rewritten. Days synced after upgrading store the timestamps.
+- Existing config entries, entity IDs, and Recorder history are preserved.
+
 ## 1.1.1-beta.1 - 2026-08-14
 
 ### Added
